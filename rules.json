@@ -1,0 +1,6 @@
+{
+  "dir": {
+    "exclude_extensions": [".png", ".jpg"],
+    "exclude_directories": ["ignore_folder"]
+  }
+}
