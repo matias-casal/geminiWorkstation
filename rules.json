@@ -1,6 +1,44 @@
 {
   "dir": {
-    "exclude_extensions": [".png", ".jpg"],
-    "exclude_directories": ["ignore_folder"]
+    "exclude_filenames": [],
+    "exclude_extensions": [
+      ".png",
+      ".jpg",
+      ".jpeg",
+      ".gif",
+      ".bmp",
+      ".tiff",
+      ".ico",
+      ".exe",
+      ".dll",
+      ".so",
+      ".o",
+      ".a",
+      ".obj",
+      ".lib",
+      ".pdb",
+      ".class",
+      ".jar",
+      ".war",
+      ".ear",
+      ".bin",
+      ".dat",
+      ".db"
+    ],
+    "exclude_directories": [
+      "ignore_folder",
+      ".git",
+      ".svn",
+      ".hg",
+      "CVS",
+      "node_modules",
+      "bower_components",
+      "dist",
+      "build",
+      "bin",
+      "obj",
+      "out",
+      "__pycache__"
+    ]
   }
 }

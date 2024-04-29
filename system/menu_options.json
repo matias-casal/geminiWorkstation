@@ -1,0 +1,73 @@
+[
+  {
+    "name": "Recreate Data",
+    "description": "Recreate all the data.",
+    "function": "recreate_data_file",
+    "main_menu": false
+  },
+  {
+    "name": "Delete Workspace",
+    "description": "Delete all in the workspace.",
+    "function": "delete_workspace",
+    "main_menu": false
+  },
+  {
+    "name": "edit",
+    "description": "Edit an entire repo with Google`s Gemini",
+    "prompt_file": "prompts/edit.md",
+    "format": "JSON",
+    "main_menu": true,
+    "pre": [
+      {
+        "function": "recreate_data_file"
+      }
+    ],
+    "inputs": [
+      {
+        "name": "modifications",
+        "description": "What modifications do you want to make?"
+      }
+    ],
+    "outputs": [
+      {
+        "function": "apply_modifications"
+      }
+    ]
+  },
+  {
+    "name": "command",
+    "description": "Make a command",
+    "prompt_file": "prompts/get_command.md",
+    "main_menu": true,
+    "inputs": [
+      {
+        "name": "command",
+        "description": "What command do you want to make?"
+      }
+    ]
+  },
+  {
+    "name": "think",
+    "description": "Think about",
+    "prompt": "Expand your knowledge on this topic",
+    "main_menu": true,
+    "inputs": [
+      {
+        "name": "topic",
+        "description": "What topic do the LLM expand their knowledge about?"
+      },
+      {
+        "name": "filename",
+        "description": "How would you like to identify the generated information?"
+      }
+    ],
+    "outputs": [
+      {
+        "function": "save_output"
+      },
+      {
+        "prompt_name": "understand"
+      }
+    ]
+  }
+]

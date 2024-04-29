@@ -14,7 +14,8 @@ setup(
         'argparse',
         'gitpython',
         'requests',
-        'rich'
+        'rich',
+        'google-generativeai'
     ],
     entry_points={
         'console_scripts': [
