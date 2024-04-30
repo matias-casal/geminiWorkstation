@@ -1,6 +1,6 @@
 {
   "dir": {
-    "exclude_filenames": [],
+    "exclude_filenames": [".DS_Store"],
     "exclude_extensions": [
       ".png",
       ".jpg",

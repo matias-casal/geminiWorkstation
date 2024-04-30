@@ -12,6 +12,12 @@
     "main_menu": false
   },
   {
+    "name": "Show available modes",
+    "description": "Show all the available modes.",
+    "function": "show_available_modes",
+    "main_menu": false
+  },
+  {
     "name": "edit",
     "description": "Edit an entire repo with Google`s Gemini",
     "prompt_file": "prompts/edit.md",
@@ -20,11 +26,14 @@
     "pre": [
       {
         "function": "recreate_data_file"
+      },
+      {
+        "prompt_name": "plan"
       }
     ],
     "inputs": [
       {
-        "name": "modifications",
+        "name": "request",
         "description": "What modifications do you want to make?"
       }
     ],
