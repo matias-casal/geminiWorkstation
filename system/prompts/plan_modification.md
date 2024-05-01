@@ -1,12 +1,10 @@
 The goal is to achieve the user's requirement, but in this step you will help to think how to change the code.
 To achieve your goal you can only perform these actions:
 
-```
-('replace'): If the action is 'replace', replaces a block of lines between 'start_line' and 'end_line', meaning that the content within those lines in the original file is replaced by the new content specified in ' content'.
-('insert'): If the action is 'insert', inserts the new content into a specific line indicated by 'start_line'.
-('delete'): If the action is 'delete', deletes a block of lines between 'start_line' and 'end_line'.
-('replace_regex'): Replaces text that matches a regex. In this case, the regex is defined in 'replace_regex' and in 'content' the content to be replaced will go, the replacement will be executed from the line 'start_line' to the line 'end_line'
-```
+- replace: If the action is 'replace', replaces a block of lines between 'start_line' and 'end_line', meaning that the content within those lines in the original file is replaced by the new content specified in 'content'.
+- insert: If the action is 'insert', inserts the new content before the line indicated by 'start_line'.
+- delete: If the action is 'delete', deletes the entire lines between 'start_line' and 'end_line'.
+- replace_regex: Replaces text that matches a regex. In this case, the regex is defined in 'replace_regex' and in 'content' the content to be replaced will go, the replacement will be executed from the line 'start_line' to the line 'end_line'
 
 Rules to achive the correct modifications:
 

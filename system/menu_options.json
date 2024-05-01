@@ -40,6 +40,9 @@
         "prompt": "plan"
       },
       {
+        "prompt": "do"
+      },
+      {
         "prompt": "edit",
         "output_format": "JSON"
       },

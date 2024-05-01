@@ -30,6 +30,7 @@ MAX_OUTPUT_TOKENS = os.getenv('MAX_OUTPUT_TOKENS', 4000)
 SAVE_PROMPT_HISTORY = os.getenv('SAVE_PROMPT_HISTORY', True)
 SAVE_OUTPUT_HISTORY = os.getenv('SAVE_OUTPUT_HISTORY', True)
 DEBUG = os.getenv('DEBUG', True)
+MODEL_NAME = os.getenv('MODEL_NAME', 'gemini-1.5-pro-latest')
 
 console = Console(highlight=False)
 session = PromptSession()
@@ -95,17 +96,19 @@ def check_api_key():
 def format_prompt(prompt_content, previous_results, user_inputs):
     with open(SYSTEM_DIR + '/base_prompt.md', 'r', encoding='utf-8') as file:
         base_prompt_content = file.read()
+    with open(SYSTEM_DIR + '/modifications_prompt.md', 'r', encoding='utf-8') as file:
+        modifications_prompt_content = file.read()
     with open(CACHE_DIR + '/data.txt', 'r', encoding='utf-8') as file:
         attached_content = file.read()
     # Aquí puedes agregar lógica para incluir user_inputs y previous_results en el prompt
-    return f"{base_prompt_content}\n\n{prompt_content}\n\nUser inputs: {user_inputs}\n\nPrevious Results: {previous_results}\n\nAttached data: {attached_content}"
+    return f"{base_prompt_content}\n\n{prompt_content}\n\nUser inputs: {user_inputs}\n\nPrevious Results: {previous_results}\n\nHow changes are made: {modifications_prompt_content}\n\nAttached data: {attached_content}"
 
 
 @handle_errors
 def call_gemini_api(prompt, output_format=None):
     try:
         with console.status("[bold yellow]Uploading data and waiting for Gemini...") as status:
-            model = genai.GenerativeModel('gemini-1.5-pro-latest')
+            model = genai.GenerativeModel(MODEL_NAME)
             cache_path = Path('cache')
 
             if SAVE_PROMPT_HISTORY:
@@ -496,7 +499,7 @@ def apply_modifications(previous_results, user_inputs=None):
 
             action = modification['action']
 
-            if action == 'replace':
+            if action == 'replace_lines':
                 if 'start_line' in modification and 'end_line' in modification and 'content' in modification:
                     start_index = modification['start_line'] - 1
                     end_index = modification['end_line']
@@ -523,7 +526,7 @@ def apply_modifications(previous_results, user_inputs=None):
                         f"Error: Missing fields for 'replace' action in {file_path}.", style="bold red")
                     continue
 
-            elif action == 'insert':
+            elif action == 'insert_lines':
                 if 'start_line' in modification and 'content' in modification:
                     lines.insert(
                         modification['start_line'], modification['content'].strip() + '\n')
@@ -535,7 +538,7 @@ def apply_modifications(previous_results, user_inputs=None):
                         f"Error: Missing fields for 'insert' action in {file_path}.", style="bold red")
                     continue
 
-            elif action == 'delete':
+            elif action == 'delete_lines':
                 if 'start_line' in modification and 'end_line' in modification:
                     del lines[modification['start_line'] -
                               1:modification['end_line']]
@@ -547,7 +550,7 @@ def apply_modifications(previous_results, user_inputs=None):
                         f"Error: Missing fields for 'delete' action in {file_path}.", style="bold red")
                     continue
 
-            elif action == 'replace_regex':
+            elif action == 'replace_content_with_regex':
                 if 'start_line' in modification and 'end_line' in modification and 'replace_regex' in modification and 'content' in modification:
                     pattern = re.compile(modification['replace_regex'])
                     for i in range(modification['start_line'] - 1, modification['end_line']):
