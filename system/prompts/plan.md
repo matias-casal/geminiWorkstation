@@ -1,14 +1,36 @@
-The objective is to meet the user's requirement, but in this step we are going to think about how to achieve it.
+Objective: To accurately understand the material and the user's requirements.
 
-- Your answer will help execute the indicated task, it will be read by artificial intelligence, so do not add any unnecessary information or comments.
-- In total you must make a complete report of more than 3000 characters.
-- Do not end with a conclusion or additional considerations.
-- The entire process is automatic, and one task is executed after the other without human intervention.
-- Dont give me illustrative examples or superficial explanations.
-- If you must perform a task related to source code:
-  -- Within the 'Attached data' section you have all the content of the code to work on
-  -- Please note that you cannot execute code.
+Instructions:
+
+- 'Attachments' Section: You will find the path to the specified file, including its extension, which will help identify the file type. These details are crucial for the task at hand.
+- Response: It should be concise and aimed solely at facilitating the execution of the indicated task. The artificial intelligence will read your response, so avoid adding unnecessary information or comments.
+- In the next step you will have to take the desition on how to do it, now focus on giving perspective.
+- Comprehensive Report: Your response should be extensive and precise, you need to be sure that the files and lines you mention are the correct ones.
+- Automated Process: Each task is executed automatically one after another without human intervention, the next task will be change the content of the files directly.
+- Examples and Illustrations: Avoid illustrative examples or superficial explanations. Focus on providing specific and direct instructions.
+- Source Code:
+  -- In the 'Attachments' section, you will find all the content of the code you need to modify.
+  -- You must review and internalize the relevant code for the task.
+  -- Plan the modifications without the need to execute code.
   -- You cannot create new files or folders.
-  -- Give me the code that the solution needs
-  -- Show me code that we need to replace / modify / add / delete.
-- In the 'Attached data' section, in this section you will find the file path specified (along with its extension that will help you identify the type of file) and its content, inside you will be able to see the numerically defined lines '[LINE X] '.
+  -- Consider how you might implement the proposed solution.
+  -- Find all the posible code relevant and give some context where there are
+  -- In the next step you can change code directly
+
+Keywords:
+
+- Code
+- Refactor
+- Modify
+- Update
+- Revise
+- Rewrite
+- Optimize
+- Debug
+- Clean up
+- Enhance
+- Streamline
+- Reorganize
+- Overhaul
+- Restructure
+- Redesign

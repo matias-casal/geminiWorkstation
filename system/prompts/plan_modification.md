@@ -1,17 +1,18 @@
-El objetivo es cumplir con el requicito del usaurio, pero en este paso vamos a planea como impactar el cambio en el codigo.
-
-- Tu respuesta va a ayudar a ejecutar la tarea indicada, sera leida por una inteligencia artificial, asi que no agregues ningun tipo de informacion o comentario innecesario.
-- Todo el proceso es automatico, y una tarea se ejecuta despues de la otra sin intervencion humana.
-- Para lograr tu objetivo solo puedes realizar estas acciones:
+The goal is to achieve the user's requirement, but in this step you will help to think how to change the code.
+To achieve your goal you can only perform these actions:
 
 ```
-('replace'): Si la acción es 'replace', reemplaza un bloque de líneas entre 'start_line' y 'en d_line', es decir que el contenido dentro de esas lineas en el archivo original se reemplaza por el contenido nuevo especificado en 'content'.
-('insert'): Si la acción es 'insert', inserta el contenido nuevo en una línea específica indicada por 'start_line'.
-('delete'): Si la acción es 'delete', elimina un bloque de líneas entre 'start_line' y 'end_line'.
-
-Si en cambio el archivo contiene grandes lineas de texto, se recomienta usar 'replace_content' o 'replace_regex'. Pero tambien los puedes utilizar para otros casos de uso donde te resulten utiles.
-('replace_content'): Reemplaza un texto dentro de una linea. en este caso, el texto a reemplazar definelo en 'replace_content' y en 'content' ira el contenido a remplazar, la linea en la que se ejecutara se define en 'start_line'
-('replace_regex'): Reemplaza texto que coincida con un regex. en este caso, el regex se define en 'replace_regex' y en 'content' ira el contenido a remplazar, el remplazo se ejecutara desde la linea 'start_line' hasta la linea 'end_line'
+('replace'): If the action is 'replace', replaces a block of lines between 'start_line' and 'end_line', meaning that the content within those lines in the original file is replaced by the new content specified in ' content'.
+('insert'): If the action is 'insert', inserts the new content into a specific line indicated by 'start_line'.
+('delete'): If the action is 'delete', deletes a block of lines between 'start_line' and 'end_line'.
+('replace_regex'): Replaces text that matches a regex. In this case, the regex is defined in 'replace_regex' and in 'content' the content to be replaced will go, the replacement will be executed from the line 'start_line' to the line 'end_line'
 ```
 
-Ahora planifica cada cambio basado en esas acciones, ten en cuenta como esta compuesto el codigo y como lo afectaran tus modificaciones, osea como quedaria el resultado final.
+Rules to achive the correct modifications:
+
+- In the 'Attached data' section you will find the file path specified (along with its extension that will help you identify the type of file) and its content. The content start with [LINE 1] then it has the content of the first line of the file, untill [LINE 2] then start the content of the line 2, and so on.
+- Plan each change based on the actions defined and keep in mind how the code is composed and how your modifications will affect it, that is, what the final result would look like.
+- Find the code in the attached data, and internalize it, so you can plan the modifications.
+- One of your most important tasks is read all the file and define the lines where the actions are gonna excecute, so pay atention.
+- Give me a overview of the modifications you are going to make, and the result you are going to get.
+- Check your previus thoughts, and make sure you are not making any mistakes.

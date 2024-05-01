@@ -1,7 +1,7 @@
 # Project ignore folders
 /data
 /cache
-/workstation
+#/workstation
 
 
 # Byte-compiled / optimized / DLL files

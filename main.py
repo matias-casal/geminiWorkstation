@@ -4,15 +4,17 @@ import re
 import json
 import signal
 import requests
+import traceback
 import importlib.util
 from datetime import datetime
+from prompt_toolkit import PromptSession
 
 from shutil import copy
 from pathlib import Path
 from git import Repo
 from rich.console import Console
 from rich.progress import Progress
-from rich.prompt import Prompt
+from rich.prompt import Prompt as ConsolePrompt
 from rich.markdown import Markdown
 from rich.spinner import Spinner
 
@@ -24,8 +26,13 @@ WORKSTATION_DIR = os.getenv('WORKSTATION_DIR', 'workstation')
 DATA_DIR = os.getenv('DATA_DIR', 'data')
 CACHE_DIR = os.getenv('CACHE_DIR', 'cache')
 SYSTEM_DIR = os.getenv('SYSTEM_DIR', 'system')
+MAX_OUTPUT_TOKENS = os.getenv('MAX_OUTPUT_TOKENS', 4000)
+SAVE_PROMPT_HISTORY = os.getenv('SAVE_PROMPT_HISTORY', True)
+SAVE_OUTPUT_HISTORY = os.getenv('SAVE_OUTPUT_HISTORY', True)
+DEBUG = os.getenv('DEBUG', True)
 
 console = Console(highlight=False)
+session = PromptSession()
 
 
 def load_functions_from_directory(directory=os.path.join(SYSTEM_DIR, 'functions')):
@@ -42,7 +49,7 @@ def load_functions_from_directory(directory=os.path.join(SYSTEM_DIR, 'functions'
                 {k: v for k, v in module.__dict__.items() if callable(v)})
 
 
-def show_models():
+def show_available_modes(previous_results, user_inputs):
     for m in genai.list_models():
         if 'generateContent' in m.supported_generation_methods:
             print(m.name)
@@ -55,9 +62,12 @@ def handle_errors(func):
         except Exception as e:
             console.print(
                 f"An unexpected error occurred: {e}", style="bold red")
+            if DEBUG:
+                console.print(traceback.format_exc(), style="bold red")
             console.print(
                 "1. Retry\n2. Return to Main Menu\n3. Exit", style="bold yellow")
-            choice = Prompt.ask("Choose an option", choices=['1', '2', '3'])
+            choice = ConsolePrompt.ask(
+                "Choose an option", choices=['1', '2', '3'])
             if choice == '1':
                 return wrapper(*args, **kwargs)  # Reintentar la función
             elif choice == '2':
@@ -76,42 +86,39 @@ def check_api_key():
     except KeyError:
         console.print(
             "API Key is not set. Please visit https://aistudio.google.com/app/apikey to obtain your API key.", style="bold red")
-        api_key = Prompt.ask("Enter your GOOGLE_API_KEY: ")
+        api_key = session.prompt("Enter your GOOGLE_API_KEY: ")
         # Set the environment variable for the current session
         os.environ['GOOGLE_API_KEY'] = api_key
         genai.configure(api_key=api_key)
 
 
-@handle_errors
-def call_gemini_api(instructions, user_prompt, response_format=None):
-    try:
-        # Leer el contenido base del prompt
-        with open('base_prompt.md', 'r', encoding='utf-8') as file:
-            base_prompt_content = file.read()
+def format_prompt(prompt_content, previous_results, user_inputs):
+    with open(SYSTEM_DIR + '/base_prompt.md', 'r', encoding='utf-8') as file:
+        base_prompt_content = file.read()
+    with open(CACHE_DIR + '/data.txt', 'r', encoding='utf-8') as file:
+        attached_content = file.read()
+    # Aquí puedes agregar lógica para incluir user_inputs y previous_results en el prompt
+    return f"{base_prompt_content}\n\n{prompt_content}\n\nUser inputs: {user_inputs}\n\nPrevious Results: {previous_results}\n\nAttached data: {attached_content}"
 
+
+@handle_errors
+def call_gemini_api(prompt, output_format=None):
+    try:
         with console.status("[bold yellow]Uploading data and waiting for Gemini...") as status:
             model = genai.GenerativeModel('gemini-1.5-pro-latest')
             cache_path = Path('cache')
-            data_file_path = cache_path / 'data.txt'
 
-            if not data_file_path.exists():
-                config = load_config()
-                process_directory('workstation', config['dir'])
+            if SAVE_PROMPT_HISTORY:
+                # Guardar el prompt en la carpeta de historial
+                prompt_history_path = cache_path / 'prompts_history'
+                prompt_history_path.mkdir(exist_ok=True)
+                timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                prompt_filename = prompt_history_path / f"{timestamp}.txt"
 
-            with open(data_file_path, 'r', encoding='utf-8') as file:
-                data_content = file.read()
-            formatted_prompt = f"{base_prompt_content}\n\n\n-+-+-+-+- User request:\n{user_prompt}\n\n\n-+-+-+-+- Instructions:\n{instructions}\n\n\n-+-+-+-+- Attached data:\n{data_content}\n\n\n"
+                with open(prompt_filename, 'w', encoding='utf-8') as file:
+                    file.write(prompt)
 
-            # Guardar el prompt en la carpeta de historial
-            prompt_history_path = cache_path / 'prompts_history'
-            prompt_history_path.mkdir(exist_ok=True)
-            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            prompt_filename = prompt_history_path / f"{timestamp}.txt"
-
-            with open(prompt_filename, 'w', encoding='utf-8') as file:
-                file.write(formatted_prompt)
-
-            token_count = model.count_tokens(formatted_prompt).total_tokens
+            token_count = model.count_tokens(prompt).total_tokens
             if token_count > 1000000:
                 console.print(
                     f"Error: The prompt is too big, it has more than 1 million tokens.", style="bold red")
@@ -126,13 +133,13 @@ def call_gemini_api(instructions, user_prompt, response_format=None):
                     f"The prompt has {token_count} tokens", style="green")
 
             # Configuración de la generación basada en el formato del prompt
-            generation_config = None
-            if response_format == "JSON":
-                generation_config = GenerationConfig(
-                    response_mime_type="application/json")
+            generation_config = GenerationConfig(
+                max_output_tokens=MAX_OUTPUT_TOKENS)
+            if output_format == "JSON":
+                generation_config.response_mime_type = "application/json"
 
             response = model.generate_content(
-                formatted_prompt,
+                prompt,
                 stream=True,
                 request_options={"timeout": 1200},
                 generation_config=generation_config
@@ -140,13 +147,14 @@ def call_gemini_api(instructions, user_prompt, response_format=None):
             status.stop()
             full_response = handle_response_chunks(response)
 
-            # Guardar el prompt y la respuesta en la carpeta de outputs
-            outputs_path = cache_path / 'outputs'
-            outputs_path.mkdir(exist_ok=True)
-            output_filename = outputs_path / f"{timestamp}.txt"
-            with open(output_filename, 'w', encoding='utf-8') as file:
-                file.write(
-                    f"Prompt:\n{formatted_prompt}\n\nResponse:\n{full_response}")
+            if SAVE_OUTPUT_HISTORY:
+                # Guardar el prompt y la respuesta en la carpeta de outputs
+                outputs_path = cache_path / 'outputs_history'
+                outputs_path.mkdir(exist_ok=True)
+                output_filename = outputs_path / f"{timestamp}.txt"
+                with open(output_filename, 'w', encoding='utf-8') as file:
+                    file.write(
+                        f"Prompt:\n{prompt}\n\nResponse:\n{full_response}")
 
             return full_response
     except google.api_core.exceptions.DeadlineExceeded:
@@ -198,7 +206,12 @@ def process_directory(directory, config, section_name):
 
 
 def process_input(path):
+    console.print(path)
     """Process the input path or URL."""
+    if isinstance(path, list):
+        console.print(
+            "Error: Expected a string for 'path', but got a list.", style="bold red")
+        return
     if path.startswith(('http://', 'https://')):
         with Spinner("Cloning repository...") as spinner:
             clone_repo(path)
@@ -213,7 +226,6 @@ def process_input(path):
                 spinner.update("Directory processed successfully!")
         elif os.path.isfile(path):
             workstation_path = Path(WORKSTATION_DIR)
-            # Asegurarse de que la carpeta workstation existe
             workstation_path.mkdir(exist_ok=True)
             copy(path, workstation_path)
             console.print(
@@ -226,111 +238,54 @@ def load_config():
         return json.load(config_file)
 
 
-def handle_prompt_from_file(prompt_content, option, show_prompt=True):
-    if show_prompt:
-        console.print(prompt_content, style="bold blue")
+def execute_action(action, previous_results, user_inputs):
+    output_format = action.get("output_format", "text")
 
-    # Verificar si hay inputs definidos en la opción
-    if "inputs" in option:
-        user_inputs = {}
-        for input_detail in option["inputs"]:
-            user_input = Prompt.ask(
-                f"Please enter {input_detail['description']}")
-            user_inputs[input_detail['name']] = user_input
-        # Aquí podrías procesar la entrada del usuario con el LLM o realizar otras acciones
-        console.print(f"Processing input: {user_inputs}", style="bold green")
-    else:
-        # Si no hay inputs, procesar el prompt directamente
-        # Aquí podrías llamar al LLM o realizar la acción necesaria sin entrada del usuario
-        console.print("Processing prompt directly.", style="bold green")
-
-
-def process_llm_response(response, outputs, user_inputs, menu_name):
-    for output in outputs:
-        if 'function' in output:
-            func = globals().get(output['function'])
-            if func:
-                # Pasar los argumentos necesarios incluyendo user_inputs y menu_name
-                func(response, user_inputs, menu_name)
-            else:
-                console.print(
-                    f"Error: Function {output['function']} is not defined.", style="bold red")
-        elif 'prompt_name' in output:
-            # Encadenar la respuesta del LLM con otro prompt
+    if "prompt" in action:
+        prompt_path = Path('system/prompts') / f"{action['prompt']}.md"
+        with open(prompt_path, 'r', encoding='utf-8') as file:
+            prompt_content = file.read()
+        formatted_prompt = format_prompt(
+            prompt_content, previous_results, user_inputs)
+        return call_gemini_api(formatted_prompt, output_format)
+    elif "function" in action:
+        function_name = action["function"]
+        if function_name in globals():
+            function_to_call = globals()[function_name]
+            return function_to_call(previous_results, user_inputs)
+        else:
             console.print(
-                f"Chaining output to prompt {output['prompt_name']} with response", style="bold green")
+                f"Function {function_name} is not defined", style="bold red")
+            return None
 
 
-def handle_pre_actions(pre_actions, user_inputs):
-    pre_thoughts = []
-    for index, pre_action in enumerate(pre_actions, start=1):
-        console.print(
-            f"Handling pre-action: {pre_action}", style="bold yellow")
-        if "function" in pre_action:
-            pre_func = globals().get(pre_action["function"])
-            if pre_func:
-                console.print(
-                    f"Executing function: {pre_action['function']}", style="bold green")
-                # Verificar si la función acepta argumentos antes de llamarla
-                if 'user_inputs' in pre_func.__code__.co_varnames:
-                    pre_func(user_inputs)
-                else:
-                    pre_func()
-            else:
-                console.print(
-                    f"Error: Function {pre_action['function']} is not defined.", style="bold red")
-                return None
-        elif "prompt_name" in pre_action:
-            prompt_path = Path('system/prompts') / \
-                f"{pre_action['prompt_name']}.md"
-            with open(prompt_path, 'r') as file:
-                prompt_content = file.read()
-            user_input_str = " ".join(
-                [f"{key}: {value}" for key, value in user_inputs.items()])
-            response = call_gemini_api(prompt_content, user_input_str)
-            pre_thoughts.append(f"-+-+-+-+- Pre thought #{index}\n{response}")
-    return pre_thoughts
+def handle_actions(actions, previous_results, user_inputs):
+    results = []
+    for action in actions:
+        console.print(action, style="bold blue")
+        result = execute_action(action, previous_results, user_inputs)
+        console.print(result, style="yellow")
+        if result is not None:
+            previous_results.append(result)
+    return results
 
 
 def handle_option(option):
-    console.print(f"Executing: {option['name']}", style="bold magenta")
-    console.print(option['description'], style="bold cyan")
-
-    pre_thoughts = []
-
-    # user inputs allways first
     user_inputs = {}
+    console.print(f"{option}", style="bold blue")
     if "inputs" in option:
         for input_detail in option["inputs"]:
-            user_input = Prompt.ask(
-                f"Please enter {input_detail['description']}")
+            user_input = session.prompt(
+                f"Please enter: {input_detail['description']}\n")
             user_inputs[input_detail['name']] = user_input
 
-    if "pre" in option:
-        pre_thoughts = handle_pre_actions(option["pre"], user_inputs)
-        if pre_thoughts is None:
-            return  # Error handling if needed
-
-    # Preparar el prompt principal para el LLM
-    prompt_content = option.get('prompt')
-    if "prompt_file" in option:
-        prompt_path = Path('system') / option['prompt_file']
-        with open(prompt_path, 'r') as file:
-            prompt_content = file.read()
-
-    # Agregar los pre_thoughts al prompt principal
-    if pre_thoughts:
-        prompt_content = "\n".join(pre_thoughts) + "\n" + prompt_content
-
-    # Llamar a la API del LLM
-    response_format = option.get("format", None)
-    response = call_gemini_api(prompt_content, " ".join(
-        user_inputs.values()), response_format)
-
-    # Procesar la respuesta del LLM según los outputs definidos
-    process_llm_response(response, option.get(
-        'outputs', []), user_inputs, option['name'])
-    display_menu()
+    results = []  # Lista para almacenar los resultados de cada acción
+    # Handle actions
+    if "actions" in option:
+        results.extend(handle_actions(option["actions"], results, user_inputs))
+    else:
+        console.print(
+            "Error: No actions defined for this option.", style="bold red")
 
 
 def display_other_functions(options):
@@ -338,24 +293,32 @@ def display_other_functions(options):
     for index, option in enumerate(options, start=1):
         console.print(f"{index}. {option['description']}", style="bold blue")
 
-    # Agregar una opción adicional para volver al menú principal
     console.print(f"{len(options) + 1}. Return to Main Menu",
                   style="bold blue")
+    console.print(f"{len(options) + 2}. Exit Program", style="bold blue")
 
-    choice = Prompt.ask("Choose an option", choices=[
-                        str(i) for i in range(1, len(options) + 2)])
+    choice = ConsolePrompt.ask("Choose an option", choices=[
+        str(i) for i in range(1, len(options) + 3)])
     if int(choice) == len(options) + 1:
-        display_menu()  # Volver al menú principal
+        display_menu()
+        return
+    elif int(choice) == len(options) + 2:
+        exit_program()  # Sale del programa
     else:
         selected_option = options[int(choice) - 1]
         handle_option(selected_option)
+        # Repite el menú después de ejecutar una acción
+        display_other_functions(options)
+
+
+def load_menu_options():
+    with open('system/menu_options.json', 'r') as file:
+        return json.load(file)
 
 
 def display_menu():
     console.print("## GEMINI WORKSTATION ##", style="bold magenta")
-    with open('system/menu_options.json', 'r') as file:
-        options = json.load(file)
-
+    options = load_menu_options()
     main_menu_options = [opt for opt in options if opt.get('main_menu', False)]
     other_functions = [
         opt for opt in options if not opt.get('main_menu', False)]
@@ -368,7 +331,7 @@ def display_menu():
     console.print(
         f"{len(main_menu_options) + 2}. Exit program", style="bold blue")
 
-    choice = Prompt.ask("Choose an option", choices=[str(
+    choice = ConsolePrompt.ask("Choose an option", choices=[str(
         i) for i in range(1, len(main_menu_options) + 3)])
     if int(choice) == len(main_menu_options) + 1:
         display_other_functions(other_functions)
@@ -379,7 +342,7 @@ def display_menu():
         handle_option(selected_option)
 
 
-def save_output(content, user_inputs, prompt_name):
+def save_output(content, user_inputs, prompt):
     """Save the output content to a specified file, now includes user inputs, function name, and prompt name."""
     filename = None
     # Verificar si 'filename' está en user_inputs y usarlo si está presente
@@ -388,7 +351,7 @@ def save_output(content, user_inputs, prompt_name):
     elif not filename:
         # Nombre de archivo por defecto si no se proporciona
         # Usar el nombre del prompt como nombre de archivo por defecto
-        filename = f"output_{prompt_name}.txt"
+        filename = f"output_{prompt}.txt"
 
     # Asegurarse de que el archivo se guarde en la carpeta 'data'
     filename = Path('data') / filename
@@ -401,11 +364,12 @@ def save_output(content, user_inputs, prompt_name):
     update_data_txt(filename, content)
 
 
-def delete_workspace():
+def delete_workspace(previous_results, user_inputs):
     """Delete the workspace after confirmation."""
     console.print(
         "This will delete all contents in the workspace including the insights data and cache.", style="bold red")
-    confirmation = Prompt.ask("Type 'delete' to confirm workspace deletion")
+    confirmation = session.prompt(
+        "Type 'delete' to confirm workspace deletion")
     if confirmation.lower() == 'delete':
         with console.status("[bold green]Deleting workspace contents...") as status:
             # Eliminar contenido de las carpetas 'workstation', 'data' y 'cache'
@@ -431,16 +395,16 @@ def update_data_txt(filename, content):
 
     try:
         relative_path = filename.relative_to(workstation_dir_path)
-        marker = f"--------------[/{relative_path}]--------------\n"
+        marker = f"```{relative_path}\n"
     except ValueError:
         relative_path = filename.relative_to(Path.cwd())
-        marker = f"--------------[/{relative_path}]--------------\n"
+        marker = f"```{relative_path}\n"
 
     # Dividir el contenido en líneas y agregar el número de línea
     lines = content.splitlines()
     numbered_lines = [
-        f"[LINEA {i + 1}] {line}\n" for i, line in enumerate(lines)]
-    new_entry = f"{marker}{''.join(numbered_lines)}\n\n"
+        f"[LINE {i + 1}] {line}\n" for i, line in enumerate(lines)]
+    new_entry = f"{marker}{''.join(numbered_lines)}```\n"
 
     if data_txt_path.exists():
         with open(data_txt_path, 'r+', encoding='utf-8') as file:
@@ -448,7 +412,7 @@ def update_data_txt(filename, content):
             start_idx = existing_content.find(marker)
             if start_idx != -1:
                 end_idx = existing_content.find(
-                    "\n--------------", start_idx + len(marker))
+                    "\n```", start_idx + len(marker))
                 if end_idx == -1:
                     end_idx = len(existing_content)
                 updated_content = existing_content[:start_idx] + \
@@ -483,73 +447,74 @@ def handle_response_chunks(model_response):
     return full_response_text
 
 
-def preprocess_json_response(response_str):
-    """Preprocess the string response to escape backslashes and convert to JSON."""
-    # Escapar las barras invertidas duplicándolas
-    if response_str.startswith('```json'):
-        response_str = response_str[7:]  # Eliminar '```json'
-        if response_str.endswith('```'):
-            response_str = response_str[:-3]  # Eliminar el último '```'
-
-    escaped_str = response_str.replace("\\", "\\\\")
-
-    # Convertir la cadena a JSON
+def preprocess_json_response(data):
+    """Preprocess the data to either parse a JSON string or convert a Python object to JSON string."""
     try:
-        response_json = json.loads(escaped_str)
+        if isinstance(data, str):
+            # Intenta cargar la cadena como JSON
+            response_json = json.loads(data)
+            console.print(response_json, style="bold green")
+            return response_json  # Devolver el objeto JSON deserializado
+        elif isinstance(data, (dict, list)):
+            console.print(data, style="bold green")
+            return data  # Devolver la cadena JSON
+        else:
+            raise TypeError("Unsupported data type for JSON conversion")
     except json.JSONDecodeError as e:
         console.print(f"Error decoding JSON: {e}", style="bold red")
         return None
-
-    return response_json
+    except TypeError as e:
+        console.print(f"Error: {e}", style="bold red")
+        return None
 
 
 @handle_errors
-def apply_modifications(modifications_str, user_inputs=None, menu_name=None):
-    modifications = preprocess_json_response(modifications_str)
-    if modifications is None:
-        console.print(
-            "Error: Failed to preprocess modifications.", style="bold red")
-        return  # Salir si la conversión falló
+def apply_modifications(previous_results, user_inputs=None):
+    modifications = previous_results[-1]
+    console.print('modifications:\n' + modifications, style="bold yellow")
+    modifications = preprocess_json_response(modifications)
+    console.print('modifications2:\n', style="bold yellow")
+    console.print(modifications, style="bold yellow")
+
+    modifications_made = []  # Lista para rastrear las modificaciones realizadas
 
     with console.status("[bold green]Applying modifications...") as status:
         total_modifications = len(modifications)
         for index, modification in enumerate(modifications, start=1):
-            # Verificar que todos los campos necesarios están presentes
-            required_fields = {'file', 'action'}
-            if not required_fields.issubset(modification.keys()):
+            if not isinstance(modification, dict) or not {'file', 'action'}.issubset(modification.keys()):
                 console.print(
-                    f"Error: Missing required fields in modification for {modification['file']}.", style="bold red")
+                    f"Error: Modification is not a dictionary or missing required fields in modification for {modification}.", style="bold red")
                 continue
 
             file_path = modification['file']
-            # Ajustar la ruta del archivo si no comienza con '/' o './'
-            if file_path.startswith('/'):
-                file_path = '.' + file_path
             if not file_path.startswith('/') and not file_path.startswith('./'):
-                file_path = './' + file_path
+                file_path = '/' + file_path
+            file_path = f"{Path(WORKSTATION_DIR)}{file_path}"
 
             with open(file_path, 'r') as file:
                 lines = file.readlines()
 
             action = modification['action']
+
             if action == 'replace':
                 if 'start_line' in modification and 'end_line' in modification and 'content' in modification:
-                    # Ajustar índices de línea para Python (base-0)
                     start_index = modification['start_line'] - 1
                     end_index = modification['end_line']
-                    # Imprimir información de depuración
                     console.print(
                         f"Attempting to replace content from line {start_index+1} to line {end_index} in {file_path}", style="bold yellow")
-                    console.print(
-                        f"Original content at line {start_index+1}: {lines[start_index].strip()}", style="bold yellow")
 
-                    # Reemplazar líneas entre start_index y end_index
+                    original_content = ''.join(
+                        lines[start_index:end_index]).strip()
                     lines[start_index:end_index] = [
-                        modification['content'] + '\n']
+                        modification['content'].strip() + '\n']
 
-                    # Imprimir el nuevo contenido que se insertará
-                    console.print(
-                        f"New content to insert: {modification['content']}", style="bold yellow")
+                    if original_content != ''.join(lines[start_index:end_index]).strip():
+                        console.print(
+                            f"Content replaced successfully.", style="bold green")
+                        modifications_made.append(modification)
+                    else:
+                        console.print(
+                            f"No content changes made.", style="bold yellow")
 
                     console.print(
                         f"File: {file_path} - Replace action completed.", style="bold green")
@@ -560,11 +525,11 @@ def apply_modifications(modifications_str, user_inputs=None, menu_name=None):
 
             elif action == 'insert':
                 if 'start_line' in modification and 'content' in modification:
-                    # Insertar contenido después de la línea especificada
-                    lines.insert(modification['start_line'],
-                                 modification['content'] + '\n')
+                    lines.insert(
+                        modification['start_line'], modification['content'].strip() + '\n')
                     console.print(
                         f"File: {file_path} - Insert action completed.", style="bold green")
+                    modifications_made.append(modification)
                 else:
                     console.print(
                         f"Error: Missing fields for 'insert' action in {file_path}.", style="bold red")
@@ -572,37 +537,27 @@ def apply_modifications(modifications_str, user_inputs=None, menu_name=None):
 
             elif action == 'delete':
                 if 'start_line' in modification and 'end_line' in modification:
-                    # Eliminar líneas entre start_line y end_line
                     del lines[modification['start_line'] -
                               1:modification['end_line']]
                     console.print(
                         f"File: {file_path} - Delete action completed.", style="bold green")
+                    modifications_made.append(modification)
                 else:
                     console.print(
                         f"Error: Missing fields for 'delete' action in {file_path}.", style="bold red")
                     continue
 
-            elif action == 'replace_content':
-                if 'start_line' in modification and 'replace_content' in modification and 'content' in modification:
-                    # Reemplazar contenido específico dentro de una línea
-                    line_index = modification['start_line'] - 1
-                    lines[line_index] = lines[line_index].replace(
-                        modification['replace_content'], modification['content'])
-                    console.print(
-                        f"File: {file_path} - Replace in line action completed.", style="bold green")
-                else:
-                    console.print(
-                        f"Error: Missing fields for 'replace_content' action in {file_path}.", style="bold red")
-                    continue
-
             elif action == 'replace_regex':
                 if 'start_line' in modification and 'end_line' in modification and 'replace_regex' in modification and 'content' in modification:
-                    # Compilar el regex proporcionado
                     pattern = re.compile(modification['replace_regex'])
-                    # Reemplazar el contenido que coincida con el regex entre las líneas especificadas
                     for i in range(modification['start_line'] - 1, modification['end_line']):
+                        original_line = lines[i]
                         lines[i] = pattern.sub(
                             modification['content'], lines[i])
+                        if lines[i] != original_line:
+                            console.print(
+                                f"Replaced content in line {i + 1} with regex.", style="bold green")
+                            modifications_made.append(modification)
                     console.print(
                         f"File: {file_path} - Replace regex action completed.", style="bold green")
                 else:
@@ -610,16 +565,16 @@ def apply_modifications(modifications_str, user_inputs=None, menu_name=None):
                         f"Error: Missing fields for 'replace_regex' action in {file_path}.", style="bold red")
                     continue
 
-            # Escribir de nuevo al archivo con las modificaciones
             with open(file_path, 'w') as file:
                 file.writelines(lines)
 
-            # Actualizar el estado del proceso
             status.update(
                 f"Processing {index}/{total_modifications} modifications")
 
+    return modifications_made  # Devolver la lista de modificaciones realizadas
 
-def recreate_data_file():
+
+def recreate_data_file(previous_results, user_inputs):
     """Recreate the data.txt file from the workstation and data directories."""
     config = load_config()
     # Limpiar el archivo data.txt antes de escribir
@@ -637,8 +592,7 @@ def exit_program():
 
 def handle_sigint(signum, frame):
     """Handle SIGINT signal (Ctrl+C)."""
-    console.print("\nExiting program... Goodbye!", style="bold red")
-    exit(0)
+    exit_program()
 
 
 # Configurar el manejador de señales para SIGINT

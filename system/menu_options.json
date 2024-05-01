@@ -1,64 +1,59 @@
 [
   {
-    "name": "Recreate Data",
     "description": "Recreate all the data.",
-    "function": "recreate_data_file",
-    "main_menu": false
-  },
-  {
-    "name": "Delete Workspace",
-    "description": "Delete all in the workspace.",
-    "function": "delete_workspace",
-    "main_menu": false
-  },
-  {
-    "name": "Show available modes",
-    "description": "Show all the available modes.",
-    "function": "show_available_modes",
-    "main_menu": false
-  },
-  {
-    "name": "edit",
-    "description": "Edit an entire repo with Google`s Gemini",
-    "prompt_file": "prompts/edit.md",
-    "format": "JSON",
-    "main_menu": true,
-    "pre": [
+    "actions": [
       {
         "function": "recreate_data_file"
-      },
-      {
-        "prompt_name": "plan"
       }
-    ],
+    ]
+  },
+  {
+    "description": "Delete all in the workspace.",
+    "actions": [
+      {
+        "function": "delete_workspace"
+      }
+    ]
+  },
+  {
+    "description": "Show all the available modes.",
+    "actions": [
+      {
+        "function": "show_available_modes"
+      }
+    ]
+  },
+  {
+    "description": "Edit an entire repo with Google`s Gemini",
+    "main_menu": true,
     "inputs": [
       {
         "name": "request",
         "description": "What modifications do you want to make?"
       }
     ],
-    "outputs": [
+    "actions": [
+      {
+        "function": "recreate_data_file"
+      },
+      {
+        "prompt": "plan"
+      },
+      {
+        "prompt": "edit",
+        "output_format": "JSON"
+      },
       {
         "function": "apply_modifications"
-      }
-    ]
-  },
-  {
-    "name": "command",
-    "description": "Make a command",
-    "prompt_file": "prompts/get_command.md",
-    "main_menu": true,
-    "inputs": [
+      },
       {
-        "name": "command",
-        "description": "What command do you want to make?"
+        "prompt": "reflect",
+        "output_format": "JSON"
       }
     ]
   },
   {
-    "name": "think",
-    "description": "Think about",
-    "prompt": "Expand your knowledge on this topic",
+    "description": "Understand the content",
     "main_menu": true,
     "inputs": [
       {
@@ -70,12 +65,12 @@
         "description": "How would you like to identify the generated information?"
       }
     ],
-    "outputs": [
+    "actions": [
       {
-        "function": "save_output"
+        "prompt": "understand"
       },
       {
-        "prompt_name": "understand"
+        "function": "save_output"
       }
     ]
   }

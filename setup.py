@@ -15,6 +15,7 @@ setup(
         'gitpython',
         'requests',
         'rich',
+        'prompt_toolkit',
         'google-generativeai'
     ],
     entry_points={
