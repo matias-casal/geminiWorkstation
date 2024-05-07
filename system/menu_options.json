@@ -1,5 +1,31 @@
 [
   {
+    "description": "Edit an entire repo with Google`s Gemini",
+    "main_menu": true,
+    "inputs": [
+      {
+        "name": "request",
+        "description": "What modifications do you want to make?"
+      }
+    ],
+    "actions": [
+      {
+        "function": "recreate_data_file"
+      },
+      {
+        "prompt": "plan_modifications"
+      },
+      {
+        "prompt": "edit",
+        "output_format": "JSON",
+        "execute_edition": true
+      },
+      {
+        "function": "apply_modifications"
+      }
+    ]
+  },
+  {
     "description": "Recreate all the data.",
     "actions": [
       {
@@ -20,38 +46,6 @@
     "actions": [
       {
         "function": "show_available_modes"
-      }
-    ]
-  },
-  {
-    "description": "Edit an entire repo with Google`s Gemini",
-    "main_menu": true,
-    "inputs": [
-      {
-        "name": "request",
-        "description": "What modifications do you want to make?"
-      }
-    ],
-    "actions": [
-      {
-        "function": "recreate_data_file"
-      },
-      {
-        "prompt": "plan"
-      },
-      {
-        "prompt": "do"
-      },
-      {
-        "prompt": "edit",
-        "output_format": "JSON"
-      },
-      {
-        "function": "apply_modifications"
-      },
-      {
-        "prompt": "reflect",
-        "output_format": "JSON"
       }
     ]
   },

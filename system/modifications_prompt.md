@@ -129,3 +129,8 @@ List of actions:
    ```
 
 THE MODIFICATIONS ARE PLANNED WISELY
+
+Rules:
+
+- If you need to add something to replace it with new content try to do it with replace_content_with_regex
+- If the line is to complex, try to not delete it, just change the content with replace_content_with_regex if its posible

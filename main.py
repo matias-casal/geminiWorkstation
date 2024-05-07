@@ -3,9 +3,11 @@ import os
 import re
 import json
 import signal
+import shutil
 import requests
 import traceback
 import importlib.util
+
 from datetime import datetime
 from prompt_toolkit import PromptSession
 
@@ -13,7 +15,8 @@ from shutil import copy
 from pathlib import Path
 from git import Repo
 from rich.console import Console
-from rich.progress import Progress
+from rich.live import Live
+from rich.text import Text
 from rich.prompt import Prompt as ConsolePrompt
 from rich.markdown import Markdown
 from rich.spinner import Spinner
@@ -22,15 +25,20 @@ import google.generativeai as genai
 import google.api_core.exceptions
 from google.generativeai import GenerationConfig
 
-WORKSTATION_DIR = os.getenv('WORKSTATION_DIR', 'workstation')
+DEBUG = os.getenv('DEBUG', True)
+MODEL_NAME = os.getenv('MODEL_NAME', 'gemini-1.5-pro-latest')
 DATA_DIR = os.getenv('DATA_DIR', 'data')
 CACHE_DIR = os.getenv('CACHE_DIR', 'cache')
 SYSTEM_DIR = os.getenv('SYSTEM_DIR', 'system')
 MAX_OUTPUT_TOKENS = os.getenv('MAX_OUTPUT_TOKENS', 4000)
 SAVE_PROMPT_HISTORY = os.getenv('SAVE_PROMPT_HISTORY', True)
 SAVE_OUTPUT_HISTORY = os.getenv('SAVE_OUTPUT_HISTORY', True)
-DEBUG = os.getenv('DEBUG', True)
-MODEL_NAME = os.getenv('MODEL_NAME', 'gemini-1.5-pro-latest')
+WORKSTATION_DIR = os.getenv('WORKSTATION_DIR', 'workstation')
+WORKSTATION_ORIGINAL_DIR = os.getenv(
+    'WORKSTATION_ORIGINAL_DIR', WORKSTATION_DIR + '/original')
+WORKSTATION_EDITED_DIR = os.getenv(
+    'WORKSTATION_EDITED_DIR', WORKSTATION_DIR + '/edited')
+
 
 console = Console(highlight=False)
 session = PromptSession()
@@ -101,7 +109,13 @@ def format_prompt(prompt_content, previous_results, user_inputs):
     with open(CACHE_DIR + '/data.txt', 'r', encoding='utf-8') as file:
         attached_content = file.read()
     # Aquí puedes agregar lógica para incluir user_inputs y previous_results en el prompt
-    return f"{base_prompt_content}\n\n{prompt_content}\n\nUser inputs: {user_inputs}\n\nPrevious Results: {previous_results}\n\nHow changes are made: {modifications_prompt_content}\n\nAttached data: {attached_content}"
+    instructions = f"{base_prompt_content}"
+    instructions += f"\n\n-------------- INSTRUCTIONS SECTION --------------\n{prompt_content}-------------- END INSTRUCTIONS SECTION --------------"
+    instructions += f"\n\n-------------- USER INPUTS SECTION --------------\n{user_inputs}\n\n-------------- END USER INPUTS SECTION --------------\n"
+    instructions += f"\n\n-------------- PREVIOUS RESULTS SECTION --------------\n{previous_results}\n\n-------------- END PREVIOUS RESULTS SECTION --------------\n"
+    instructions += f"\n\n-------------- HOW CHANGES ARE MADE SECTION --------------\n{modifications_prompt_content}\n\n-------------- END HOW CHANGES ARE MADE SECTION --------------\n"
+    instructions += f"\n\n-------------- ATTACHED DATA SECTION --------------\n{attached_content}\n\n-------------- END ATTACHED DATA SECTION --------------\n"
+    return instructions
 
 
 @handle_errors
@@ -149,7 +163,10 @@ def call_gemini_api(prompt, output_format=None):
             )
             status.stop()
             full_response = handle_response_chunks(response)
-
+            if output_format != "JSON":
+                console.print(Markdown(full_response))
+            else:
+                console.print(full_response, style="italic")
             if SAVE_OUTPUT_HISTORY:
                 # Guardar el prompt y la respuesta en la carpeta de outputs
                 outputs_path = cache_path / 'outputs_history'
@@ -209,30 +226,41 @@ def process_directory(directory, config, section_name):
 
 
 def process_input(path):
-    console.print(path)
     """Process the input path or URL."""
     if isinstance(path, list):
         console.print(
             "Error: Expected a string for 'path', but got a list.", style="bold red")
         return
     if path.startswith(('http://', 'https://')):
-        with Spinner("Cloning repository...") as spinner:
-            clone_repo(path)
-            spinner.update("Repository cloned successfully!")
+        with console.status("[bold yellow]Cloning repository...") as status:
+            clone_repo(path, directory=Path(WORKSTATION_ORIGINAL_DIR))
+            status.update("Repository cloned successfully!")
     else:
         if not os.path.exists(path):
             console.print("The path does not exist.", style="red")
             return
         if os.path.isdir(path):
-            with Spinner("Processing directory...") as spinner:
-                process_directory(path, load_config())
-                spinner.update("Directory processed successfully!")
+            with console.status("[bold yellow]Processing directory...") as status:
+                # Asegurarse de que la carpeta 'original' existe
+                original_path = Path(WORKSTATION_ORIGINAL_DIR)
+                original_path.mkdir(parents=True, exist_ok=True)
+
+                # Copiar el contenido a la carpeta 'original'
+                for item in os.listdir(path):
+                    s = os.path.join(path, item)
+                    d = os.path.join(original_path, item)
+                    if os.path.isdir(s):
+                        shutil.copytree(s, d, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(s, d)
+
+                status.update("Directory processed successfully!")
         elif os.path.isfile(path):
-            workstation_path = Path(WORKSTATION_DIR)
-            workstation_path.mkdir(exist_ok=True)
-            copy(path, workstation_path)
+            original_path = Path(WORKSTATION_ORIGINAL_DIR)
+            original_path.mkdir(parents=True, exist_ok=True)
+            copy(path, original_path)
             console.print(
-                f"File {path} copied to {workstation_path}.", style="green")
+                f"File {path} copied to {original_path}.", style="green")
 
 
 def load_config():
@@ -265,17 +293,57 @@ def execute_action(action, previous_results, user_inputs):
 def handle_actions(actions, previous_results, user_inputs):
     results = []
     for action in actions:
-        console.print(action, style="bold blue")
+        if "function" in action:
+            console.print(
+                Markdown(f"\n\n# Function: {action['function']}"), style="bold bright_magenta")
+        elif "prompt" in action:
+            console.print(
+                Markdown(f"\n\n# Prompt: {action['prompt']}"), style="bold bright_magenta")
+
         result = execute_action(action, previous_results, user_inputs)
-        console.print(result, style="yellow")
         if result is not None:
             previous_results.append(result)
     return results
 
 
+def prepare_editing_environment():
+    """Prepara el entorno de edición copiando archivos de 'original' a 'edited' solo si son necesarios."""
+    original_dir = Path(WORKSTATION_DIR) / 'original'
+    edited_dir = Path(WORKSTATION_DIR) / 'edited'
+    edited_dir.mkdir(parents=True, exist_ok=True)
+
+    with console.status("[bold green]Preparing editing environment...") as status:
+        # Copiar archivos de 'original' a 'edited' solo si no existen o están desactualizados
+        for item in os.listdir(original_dir):
+            source_path = original_dir / item
+            target_path = edited_dir / item
+            # Verificar si el archivo o directorio necesita ser actualizado
+            if not target_path.exists() or file_needs_update(source_path, target_path):
+                if source_path.is_dir():
+                    if target_path.exists():
+                        shutil.rmtree(target_path)
+                    shutil.copytree(source_path, target_path,
+                                    dirs_exist_ok=True)
+                else:
+                    shutil.copy2(source_path, target_path)
+                status.update(f"Copied {item} to editing environment.")
+        status.update("Editing environment ready!")
+
+
+def file_needs_update(source, target):
+    """Determina si un archivo necesita ser actualizado basado en la fecha de modificación y tamaño."""
+    if not target.exists():
+        return True
+    source_stat = source.stat()
+    target_stat = target.stat()
+    # Comprobar si la fecha de modificación o el tamaño del archivo son diferentes
+    if source_stat.st_mtime > target_stat.st_mtime or source_stat.st_size != target_stat.st_size:
+        return True
+    return False
+
+
 def handle_option(option):
     user_inputs = {}
-    console.print(f"{option}", style="bold blue")
     if "inputs" in option:
         for input_detail in option["inputs"]:
             user_input = session.prompt(
@@ -283,6 +351,13 @@ def handle_option(option):
             user_inputs[input_detail['name']] = user_input
 
     results = []  # Lista para almacenar los resultados de cada acción
+
+    # Verificar si alguna acción requiere ejecución de edición
+    execute_edition = any(action.get('execute_edition', False)
+                          for action in option.get('actions', []))
+    if execute_edition:
+        prepare_editing_environment()
+
     # Handle actions
     if "actions" in option:
         results.extend(handle_actions(option["actions"], results, user_inputs))
@@ -290,9 +365,25 @@ def handle_option(option):
         console.print(
             "Error: No actions defined for this option.", style="bold red")
 
+    # Verificar si el último resultado es un JSON con achieved_goal en false
+    if results and isinstance(results[-1], dict) and results[-1].get('achieved_goal') == False:
+        console.print("Goal not achieved. Choose an option:",
+                      style="bold yellow")
+        choice = ConsolePrompt.ask("Choose an option", choices=[
+                                   '1. Retry', '2. Retry with advice', '3. Exit'], default='1')
+        if choice.startswith('1'):
+            handle_actions(option["actions"], results,
+                           user_inputs)  # Reintentar
+        elif choice.startswith('2'):
+            advice = session.prompt("Enter advice for retrying: ")
+            user_inputs['advice'] = advice
+            handle_actions(option["actions"], results, user_inputs)
+        elif choice.startswith('3'):
+            display_menu()
+
 
 def display_other_functions(options):
-    console.print("## Other Functions ##", style="bold magenta")
+    console.print(Markdown(f"\n\n# Other Functions"), style="bold magenta")
     for index, option in enumerate(options, start=1):
         console.print(f"{index}. {option['description']}", style="bold blue")
 
@@ -320,7 +411,7 @@ def load_menu_options():
 
 
 def display_menu():
-    console.print("## GEMINI WORKSTATION ##", style="bold magenta")
+    console.print(Markdown(f"\n\n# GEMINI WORKSTATION"), style="bold magenta")
     options = load_menu_options()
     main_menu_options = [opt for opt in options if opt.get('main_menu', False)]
     other_functions = [
@@ -432,8 +523,10 @@ def update_data_txt(filename, content):
 
 def handle_response_chunks(model_response):
     full_response_text = ""
+    live_text = Text()
 
-    with console.status("[bold green]Getting data from Gemini...") as status:
+    # Usar Live para mostrar el texto que va llegando
+    with Live(live_text, console=console, auto_refresh=True, transient=True) as live:
         for chunk in model_response:
             text = getattr(chunk, 'text', str(chunk)
                            if isinstance(chunk, str) else None)
@@ -444,8 +537,11 @@ def handle_response_chunks(model_response):
 
             # Acumular texto en el texto completo
             full_response_text += text
-            # Imprimir el texto a medida que llega
-            print(text, end='', flush=True)
+            # Actualizar el texto en el Live display
+            live_text.append(text)
+            live.update(live_text)
+        live.update(Text(""))
+        live.stop()
 
     return full_response_text
 
@@ -456,10 +552,8 @@ def preprocess_json_response(data):
         if isinstance(data, str):
             # Intenta cargar la cadena como JSON
             response_json = json.loads(data)
-            console.print(response_json, style="bold green")
             return response_json  # Devolver el objeto JSON deserializado
         elif isinstance(data, (dict, list)):
-            console.print(data, style="bold green")
             return data  # Devolver la cadena JSON
         else:
             raise TypeError("Unsupported data type for JSON conversion")
@@ -474,10 +568,7 @@ def preprocess_json_response(data):
 @handle_errors
 def apply_modifications(previous_results, user_inputs=None):
     modifications = previous_results[-1]
-    console.print('modifications:\n' + modifications, style="bold yellow")
     modifications = preprocess_json_response(modifications)
-    console.print('modifications2:\n', style="bold yellow")
-    console.print(modifications, style="bold yellow")
 
     modifications_made = []  # Lista para rastrear las modificaciones realizadas
 
@@ -492,7 +583,7 @@ def apply_modifications(previous_results, user_inputs=None):
             file_path = modification['file']
             if not file_path.startswith('/') and not file_path.startswith('./'):
                 file_path = '/' + file_path
-            file_path = f"{Path(WORKSTATION_DIR)}{file_path}"
+            file_path = f"{Path(WORKSTATION_EDITED_DIR)}{file_path}"
 
             with open(file_path, 'r') as file:
                 lines = file.readlines()
@@ -552,7 +643,8 @@ def apply_modifications(previous_results, user_inputs=None):
 
             elif action == 'replace_content_with_regex':
                 if 'start_line' in modification and 'end_line' in modification and 'replace_regex' in modification and 'content' in modification:
-                    pattern = re.compile(modification['replace_regex'])
+                    regex_key = 'replace_regex' if 'replace_regex' in modification else 'regex_pattern'
+                    pattern = re.compile(modification[regex_key])
                     for i in range(modification['start_line'] - 1, modification['end_line']):
                         original_line = lines[i]
                         lines[i] = pattern.sub(
@@ -566,7 +658,8 @@ def apply_modifications(previous_results, user_inputs=None):
                 else:
                     console.print(
                         f"Error: Missing fields for 'replace_regex' action in {file_path}.", style="bold red")
-                    continue
+                    raise Exception(
+                        "Error: Missing required fields for 'replace_regex' action.")
 
             with open(file_path, 'w') as file:
                 file.writelines(lines)
@@ -598,10 +691,6 @@ def handle_sigint(signum, frame):
     exit_program()
 
 
-# Configurar el manejador de señales para SIGINT
-signal.signal(signal.SIGINT, handle_sigint)
-
-
 def main():
     """Main function to handle command line arguments and direct program flow."""
     parser = argparse.ArgumentParser(
@@ -629,6 +718,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # Configurar el manejador de señales para SIGINT
+    signal.signal(signal.SIGINT, handle_sigint)
     check_api_key()
     load_functions_from_directory()
     main()
