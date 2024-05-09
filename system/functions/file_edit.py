@@ -1,4 +1,4 @@
-def replace_lines(file_path, start_line, end_line, content):
+def replace_lines(file_path: str, start_line: int, end_line: int, content: str):
     """
     Replace lines in a file from start_line to end_line with the provided content.
     This function reads all lines from the file, replaces the specified range with new content,
@@ -21,7 +21,7 @@ def replace_lines(file_path, start_line, end_line, content):
     return lines
 
 
-def insert_lines(file_path, start_line, content):
+def insert_lines(file_path: str, start_line: int, content: str):
     """
     Insert lines into a file at the specified line number.
     This function reads all lines from the file, inserts new content at the specified line number,
@@ -43,7 +43,7 @@ def insert_lines(file_path, start_line, content):
     return lines
 
 
-def delete_lines(file_path, start_line, end_line):
+def delete_lines(file_path: str, start_line: int, end_line: int):
     """
     Delete lines from a file from start_line to end_line.
     This function reads all lines from the file, removes the specified range of lines,

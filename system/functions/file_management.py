@@ -1,7 +1,7 @@
 import os
 
 
-def create_file(file_path, content=''):
+def create_file(file_path: str, content: str = ''):
     """
     Create a new file with optional initial content.
     This function creates a new file at the specified path and can optionally write initial content to it.
@@ -18,7 +18,7 @@ def create_file(file_path, content=''):
     return True
 
 
-def delete_file(file_path):
+def delete_file(file_path: str):
     """
     Delete a file at a specified path.
     This function deletes the file located at the specified path.

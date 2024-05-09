@@ -7,7 +7,7 @@ It is crucial to understand how the content it is relates to the task. An in-dep
 [LINE 2] content of line two
 ```
 
-If user input is provided, it is crucial to consider its contents carefully as it may indicate a specific task or request. However, always cross-reference this input with the established instructions to ensure that your response aligns with the overarching objectives.
+If user input is provided, it is crucial to consider its contents carefully as it may indicate a specific task or request. However, always cross-reference this input with the established instructions to ensure that your response aligns with the overarching objectives. If you need more feedback to acomplish the task you can ask the user.
 
 Always incorporate any feedback or results from previous interactions in your current response. This historical context can help refine your approach and improve accuracy. But if you see that some information is not correct, use this opportunity to improve the response.
 

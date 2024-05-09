@@ -1,0 +1,6 @@
+/Users/casy/.dockers/geminiWorkstation
+/Users/casy/.dockers/geminiWorkstation/generated
+/Users/casy/.dockers/geminiWorkstation/workstation
+/Users/casy/.dockers/geminiWorkstation/workstation/.DS_Store
+/Users/casy/.dockers/geminiWorkstation/workstation/original
+/Users/casy/.dockers/geminiWorkstation/workstation/edited

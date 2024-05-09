@@ -1,18 +1,18 @@
+from threading import Thread
 import argparse
+import sys
 import os
 import time
 import json
 import signal
 import shutil
-import asyncio
 import requests
 import threading
 import traceback
 import importlib.util
-from datetime import datetime, timedelta
+from datetime import datetime
 from collections.abc import Iterable
 from prompt_toolkit import PromptSession
-
 from shutil import copy
 from pathlib import Path
 from git import Repo
@@ -22,7 +22,6 @@ from rich.text import Text
 from rich.prompt import Prompt as ConsolePrompt
 from rich.markdown import Markdown
 from rich.spinner import Spinner
-from rich.panel import Panel
 
 import google.generativeai as genai
 import google.api_core.exceptions
@@ -42,16 +41,47 @@ WORKSTATION_ORIGINAL_DIR = os.getenv(
     'WORKSTATION_ORIGINAL_DIR', WORKSTATION_DIR + '/original')
 WORKSTATION_EDITED_DIR = os.getenv(
     'WORKSTATION_EDITED_DIR', WORKSTATION_DIR + '/edited')
-FEEDBACK_TIMEOUT = int(os.getenv('FEEDBACK_TIMEOUT', 10))
+FEEDBACK_TIMEOUT = int(os.getenv('FEEDBACK_TIMEOUT', 3))
 
 
 console = Console(highlight=False)
 session = PromptSession()
 
 
+def feedback_timer(timeout=FEEDBACK_TIMEOUT):
+    """
+    Display a prompt with a countdown timer. Return True if the user presses Enter before the timer expires, otherwise return False.
+    """
+    console_update_time = 0.2
+    input_received = [False]
+
+    def get_input():
+        nonlocal input_received
+        input()  # Wait for Enter press
+        input_received[0] = True
+
+    input_thread = Thread(target=get_input)
+    input_thread.daemon = True
+    input_thread.start()
+
+    with console.status(f"[bold yellow]Press Enter if you want to add feedback (Timeout in {timeout} seconds): ", spinner="dots") as status:
+        remaining = timeout
+        while remaining > 0:
+            if input_received[0]:
+                status.update("")
+                return True
+            status.update(
+                f"[bold yellow]Press Enter if you want to add feedback (Timeout in {remaining:.1f} seconds): ")
+            time.sleep(console_update_time)
+            remaining -= console_update_time  # Decrement the remaining time by 0.3 seconds
+
+    status.update("")
+    return False
+
+
 def load_functions_from_directory(directory=os.path.join(SYSTEM_DIR, 'functions')):
-    console.print("Loading functions from directory:",
-                  directory, style="yellow")
+    console.print("Loading functions...", directory, style="yellow")
+    loaded_functions = {}
     for filename in os.listdir(directory):
         if filename.endswith('.py'):
             module_name = filename[:-3]  # Remove the '.py' from filename
@@ -60,9 +90,11 @@ def load_functions_from_directory(directory=os.path.join(SYSTEM_DIR, 'functions'
                 module_name, module_path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
-            # Import all functions from the module
-            globals().update(
-                {k: v for k, v in module.__dict__.items() if callable(v)})
+            # Import only functions (not classes or other callable types) from the module
+            for func_name, func in module.__dict__.items():
+                if callable(func) and not isinstance(func, type):
+                    loaded_functions[func_name] = func
+    return loaded_functions
 
 
 def show_available_modes(previous_results, user_inputs):
@@ -95,24 +127,32 @@ def handle_errors(func):
 
 
 def check_api_key():
-    """Check if the GOOGLE_API_KEY environment variable is set. If not, prompt the user to set it."""
+    """Check if the GEMINI_API_KEY environment variable is set. If not, prompt the user to set it."""
     try:
-        api_key = os.environ['GOOGLE_API_KEY']
+        api_key = os.environ['GEMINI_API_KEY']
         console.print("API Key is set.", style="green")
     except KeyError:
         console.print(
             "API Key is not set. Please visit https://aistudio.google.com/app/apikey to obtain your API key.", style="bold red")
-        api_key = session.prompt("Enter your GOOGLE_API_KEY: ")
-        # Set the environment variable for the current session
-        os.environ['GOOGLE_API_KEY'] = api_key
+        api_key = session.prompt("Enter your GEMINI_API_KEY: ")
         genai.configure(api_key=api_key)
 
 
 def tool_config_from_mode(mode: str, fns: Iterable[str] = ()):
     """Create a tool config with the specified function calling mode."""
-    return content_types.to_tool_config(
-        {"function_calling_config": {"mode": mode, "allowed_function_names": fns}}
-    )
+    if mode == "ANY":
+        return {
+            "function_calling_config": {
+                "mode": mode,
+                "allowed_function_names": list(fns)
+            }
+        }
+    else:
+        return {
+            "function_calling_config": {
+                "mode": mode
+            }
+        }
 
 
 def format_prompt(prompt_content, previous_results, user_inputs):
@@ -132,52 +172,20 @@ def format_prompt(prompt_content, previous_results, user_inputs):
     return system_prompt, prompt
 
 
-async def input_with_timeout(prompt, timeout=10):
-    """Solicita input al usuario con un timer visual y manejo interactivo de la entrada."""
-    end_time = datetime.now() + timedelta(seconds=timeout)
-    input_received = None
-
-    def update_timer():
-        """Actualiza el timer en la consola."""
-        while datetime.now() < end_time and input_received is None:
-            remaining = max(0, (end_time - datetime.now()).total_seconds())
-            console.print(Panel(
-                f"[bold yellow]Tiempo restante: {remaining:.2f} segundos[/bold yellow]", title="Timer"), style="bold yellow")
-            time.sleep(0.1)
-        # Asegura que el timer no sobrescriba el input del usuario
-        console.print("\n")
-
-    async def get_input():
-        """Captura la entrada del usuario."""
-        nonlocal input_received
-        input_received = await asyncio.to_thread(ConsolePrompt.ask, prompt)
-
-    timer_thread = asyncio.to_thread(update_timer)
-    input_task = asyncio.create_task(get_input())
-    await asyncio.wait([input_task], return_when=asyncio.FIRST_COMPLETED)
-    timer_thread.cancel()  # Cancelar el timer una vez que se recibe la entrada
-
-    if input_received is not None:
-        console.print("\nFeedback recibido: " + input_received, style="green")
-    else:
-        console.print(
-            "\nTiempo agotado. Continuando sin feedback...", style="yellow")
-
-    return input_received
-
-
 @handle_errors
 def call_gemini_api(system_prompt, prompt, output_format=None):
     try:
         with console.status("[bold yellow]Uploading data and waiting for Gemini...") as status:
             # Listar las funciones disponibles
-            tools = [func for name, func in globals().items() if callable(
-                func) and name in os.path.join(SYSTEM_DIR, 'functions')]
+            tools = list(load_functions_from_directory().values())
 
             # Crear la configuración de herramientas usando la función tool_config_from_mode
             tool_config = tool_config_from_mode(
                 "auto", [func.__name__ for func in tools])
-
+            console.print("Configuring model...",
+                          MODEL_NAME, style="yellow")
+            console.print("Tools:", tools, style="yellow")
+            console.print("Tool config:", tool_config, style="yellow")
             # Configurar el modelo con las herramientas y la configuración de herramientas
             model = genai.GenerativeModel(
                 MODEL_NAME,
@@ -237,7 +245,10 @@ def call_gemini_api(system_prompt, prompt, output_format=None):
                 with open(output_filename, 'w', encoding='utf-8') as file:
                     file.write(
                         f"Prompt:\n{prompt}\n\nResponse:\n{full_response}")
-
+            for content in response:
+                if content.parts[0].function_call:
+                    console.print(
+                        'function call', content.parts[0].function_call)
             return full_response
     except google.api_core.exceptions.DeadlineExceeded:
         console.print(
@@ -362,7 +373,7 @@ def execute_action(action, previous_results, user_inputs):
             return None
 
 
-async def handle_actions(actions, previous_results, user_inputs):
+def handle_actions(actions, previous_results, user_inputs):
     results = []
     for action in actions:
         console.print(Markdown(
@@ -370,17 +381,16 @@ async def handle_actions(actions, previous_results, user_inputs):
 
         # Capture user feedback with a 2-second timeout only for 'prompt' actions
         if 'prompt' in action:
-            feedback = await input_with_timeout(
-                "Press enter if you want to add feedback before this step")
+            feedback = feedback_timer()
             if feedback:
-                console.print(f"Feedback received", style="green")
-                # Store feedback in user_inputs
-                user_inputs['user feedback'] = feedback
+                user_inputs['user feedback'] = ConsolePrompt.ask(
+                    "Please provide your feedback")
             else:
                 console.print("No feedback received, continuing...",
                               style="yellow")
         # Execute action
         result = execute_action(action, previous_results, user_inputs)
+        console.print(f"\n\nResult: {result}", style="bold green")
         if result is not None:
             previous_results.append(result)
 
@@ -423,13 +433,11 @@ def file_needs_update(source, target):
     return False
 
 
-async def handle_option(option):
+def handle_option(option):
     user_inputs = {}
-    session = PromptSession()
-
     if "inputs" in option:
         for input_detail in option["inputs"]:
-            user_input = await session.prompt_async(
+            user_input = session.prompt(
                 f"Please enter: {input_detail['description']}\n")
             user_inputs[input_detail['name']] = user_input
 
@@ -443,7 +451,7 @@ async def handle_option(option):
 
     # Handle actions
     if "actions" in option:
-        results.extend(await handle_actions(option["actions"], results, user_inputs))
+        results.extend(handle_actions(option["actions"], results, user_inputs))
     else:
         console.print(
             "Error: No actions defined for this option.", style="bold red")
@@ -452,20 +460,20 @@ async def handle_option(option):
     if results and isinstance(results[-1], dict) and results[-1].get('achieved_goal') == False:
         console.print("Goal not achieved. Choose an option:",
                       style="bold yellow")
-        choice = await session.prompt_async("Choose an option", choices=[
-            '1. Retry', '2. Retry with advice', '3. Exit'], default='1')
+        choice = ConsolePrompt.ask("Choose an option", choices=[
+                                   '1. Retry', '2. Retry with advice', '3. Exit'], default='1')
         if choice.startswith('1'):
-            await handle_actions(option["actions"], results,
-                                 user_inputs)  # Reintentar
+            handle_actions(option["actions"], results,
+                           user_inputs)  # Reintentar
         elif choice.startswith('2'):
-            advice = await session.prompt_async("Enter advice for retrying: ")
+            advice = session.prompt("Enter advice for retrying: ")
             user_inputs['advice'] = advice
-            await handle_actions(option["actions"], results, user_inputs)
+            handle_actions(option["actions"], results, user_inputs)
         elif choice.startswith('3'):
             display_menu()
 
 
-async def display_other_functions(options):
+def display_other_functions(options):
     console.print(Markdown(f"\n\n# Other Functions"), style="bold magenta")
     for index, option in enumerate(options, start=1):
         console.print(f"{index}. {option['description']}", style="bold blue")
@@ -483,9 +491,9 @@ async def display_other_functions(options):
         exit_program()  # Sale del programa
     else:
         selected_option = options[int(choice) - 1]
-        await handle_option(selected_option)
-        # Repite el men después de ejecutar una acción
-        await display_other_functions(options)
+        handle_option(selected_option)
+        # Repite el menú después de ejecutar una acción
+        display_other_functions(options)
 
 
 def load_menu_options():
@@ -493,7 +501,7 @@ def load_menu_options():
         return json.load(file)
 
 
-async def display_menu():
+def display_menu():
     console.print(Markdown(f"\n\n# GEMINI WORKSTATION"), style="bold magenta")
     options = load_menu_options()
     main_menu_options = [opt for opt in options if opt.get('main_menu', False)]
@@ -511,12 +519,12 @@ async def display_menu():
     choice = ConsolePrompt.ask("Choose an option", choices=[str(
         i) for i in range(1, len(main_menu_options) + 3)])
     if int(choice) == len(main_menu_options) + 1:
-        await display_other_functions(other_functions)
+        display_other_functions(other_functions)
     elif int(choice) == len(main_menu_options) + 2:
         exit_program()
     else:
         selected_option = main_menu_options[int(choice) - 1]
-        await handle_option(selected_option)
+        handle_option(selected_option)
 
 
 def save_output(content, user_inputs, prompt):
@@ -669,7 +677,7 @@ def handle_sigint(signum, frame):
     exit_program()
 
 
-async def main():
+def main():
     """Main function to handle command line arguments and direct program flow."""
     try:
         parser = argparse.ArgumentParser(
@@ -681,19 +689,19 @@ async def main():
         # Verificar si ya existe un workspace configurado o si hay datos procesados
         if os.path.exists(WORKSTATION_DIR) and os.listdir(WORKSTATION_DIR):
             console.print("Workspace already set up.", style="green")
-            await display_menu()  # Mostrar el menú directamente si ya hay un workspace
+            display_menu()  # Mostrar el menú directamente si ya hay un workspace
         elif args.path:
             process_input(args.path)
-            await display_menu()  # Mostrar el menú después de procesar la entrada
+            display_menu()  # Mostrar el menú después de procesar la entrada
         else:
             console.print(
                 "Welcome, please enter the directory path or repository URL:", style="yellow")
             path = input()
             if path:
                 process_input(path)
-                await display_menu()  # Mostrar el menú después de procesar la entrada
+                display_menu()  # Mostrar el menú después de procesar la entrada
             else:
-                await display_menu()  # Mostrar el menú si no se proporciona una entrada
+                display_menu()  # Mostrar el menú si no se proporciona una entrada
     except KeyboardInterrupt:
         exit_program()  # Llamar a exit_program cuando se detecta una interrupción del teclado
 
@@ -702,5 +710,4 @@ if __name__ == "__main__":
     # Configurar el manejador de señales para SIGINT
     signal.signal(signal.SIGINT, handle_sigint)
     check_api_key()
-    load_functions_from_directory()
-    asyncio.run(main())
+    main()
