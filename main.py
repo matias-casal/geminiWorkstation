@@ -1,14 +1,16 @@
 import argparse
 import os
-import re
+import time
 import json
 import signal
 import shutil
+import asyncio
 import requests
+import threading
 import traceback
 import importlib.util
-
-from datetime import datetime
+from datetime import datetime, timedelta
+from collections.abc import Iterable
 from prompt_toolkit import PromptSession
 
 from shutil import copy
@@ -20,10 +22,12 @@ from rich.text import Text
 from rich.prompt import Prompt as ConsolePrompt
 from rich.markdown import Markdown
 from rich.spinner import Spinner
+from rich.panel import Panel
 
 import google.generativeai as genai
 import google.api_core.exceptions
 from google.generativeai import GenerationConfig
+from google.generativeai.types import content_types
 
 DEBUG = os.getenv('DEBUG', True)
 MODEL_NAME = os.getenv('MODEL_NAME', 'gemini-1.5-pro-latest')
@@ -38,6 +42,7 @@ WORKSTATION_ORIGINAL_DIR = os.getenv(
     'WORKSTATION_ORIGINAL_DIR', WORKSTATION_DIR + '/original')
 WORKSTATION_EDITED_DIR = os.getenv(
     'WORKSTATION_EDITED_DIR', WORKSTATION_DIR + '/edited')
+FEEDBACK_TIMEOUT = int(os.getenv('FEEDBACK_TIMEOUT', 10))
 
 
 console = Console(highlight=False)
@@ -45,6 +50,8 @@ session = PromptSession()
 
 
 def load_functions_from_directory(directory=os.path.join(SYSTEM_DIR, 'functions')):
+    console.print("Loading functions from directory:",
+                  directory, style="yellow")
     for filename in os.listdir(directory):
         if filename.endswith('.py'):
             module_name = filename[:-3]  # Remove the '.py' from filename
@@ -101,28 +108,83 @@ def check_api_key():
         genai.configure(api_key=api_key)
 
 
+def tool_config_from_mode(mode: str, fns: Iterable[str] = ()):
+    """Create a tool config with the specified function calling mode."""
+    return content_types.to_tool_config(
+        {"function_calling_config": {"mode": mode, "allowed_function_names": fns}}
+    )
+
+
 def format_prompt(prompt_content, previous_results, user_inputs):
     with open(SYSTEM_DIR + '/base_prompt.md', 'r', encoding='utf-8') as file:
         base_prompt_content = file.read()
-    with open(SYSTEM_DIR + '/modifications_prompt.md', 'r', encoding='utf-8') as file:
-        modifications_prompt_content = file.read()
     with open(CACHE_DIR + '/data.txt', 'r', encoding='utf-8') as file:
         attached_content = file.read()
-    # Aquí puedes agregar lógica para incluir user_inputs y previous_results en el prompt
-    instructions = f"{base_prompt_content}"
-    instructions += f"\n\n-------------- INSTRUCTIONS SECTION --------------\n{prompt_content}-------------- END INSTRUCTIONS SECTION --------------"
-    instructions += f"\n\n-------------- USER INPUTS SECTION --------------\n{user_inputs}\n\n-------------- END USER INPUTS SECTION --------------\n"
-    instructions += f"\n\n-------------- PREVIOUS RESULTS SECTION --------------\n{previous_results}\n\n-------------- END PREVIOUS RESULTS SECTION --------------\n"
-    instructions += f"\n\n-------------- HOW CHANGES ARE MADE SECTION --------------\n{modifications_prompt_content}\n\n-------------- END HOW CHANGES ARE MADE SECTION --------------\n"
-    instructions += f"\n\n-------------- ATTACHED DATA SECTION --------------\n{attached_content}\n\n-------------- END ATTACHED DATA SECTION --------------\n"
-    return instructions
+
+    # Construir el system_prompt con base_prompt y instructions section
+    system_prompt = f"{base_prompt_content}\n\n-- INSTRUCTIONS:\n{prompt_content}"
+
+    # Construir el prompt completo con todas las secciones
+    prompt = f"\n\n-------------- USER INPUTS SECTION --------------\n{user_inputs}\n\n-------------- END USER INPUTS SECTION --------------\n"
+    prompt += f"\n\n-------------- PREVIOUS RESULTS SECTION --------------\n{previous_results}\n\n-------------- END PREVIOUS RESULTS SECTION --------------\n"
+    prompt += f"\n\n-------------- ATTACHED DATA SECTION --------------\n{attached_content}\n\n-------------- END ATTACHED DATA SECTION --------------\n"
+
+    return system_prompt, prompt
+
+
+async def input_with_timeout(prompt, timeout=10):
+    """Solicita input al usuario con un timer visual y manejo interactivo de la entrada."""
+    end_time = datetime.now() + timedelta(seconds=timeout)
+    input_received = None
+
+    def update_timer():
+        """Actualiza el timer en la consola."""
+        while datetime.now() < end_time and input_received is None:
+            remaining = max(0, (end_time - datetime.now()).total_seconds())
+            console.print(Panel(
+                f"[bold yellow]Tiempo restante: {remaining:.2f} segundos[/bold yellow]", title="Timer"), style="bold yellow")
+            time.sleep(0.1)
+        # Asegura que el timer no sobrescriba el input del usuario
+        console.print("\n")
+
+    async def get_input():
+        """Captura la entrada del usuario."""
+        nonlocal input_received
+        input_received = await asyncio.to_thread(ConsolePrompt.ask, prompt)
+
+    timer_thread = asyncio.to_thread(update_timer)
+    input_task = asyncio.create_task(get_input())
+    await asyncio.wait([input_task], return_when=asyncio.FIRST_COMPLETED)
+    timer_thread.cancel()  # Cancelar el timer una vez que se recibe la entrada
+
+    if input_received is not None:
+        console.print("\nFeedback recibido: " + input_received, style="green")
+    else:
+        console.print(
+            "\nTiempo agotado. Continuando sin feedback...", style="yellow")
+
+    return input_received
 
 
 @handle_errors
-def call_gemini_api(prompt, output_format=None):
+def call_gemini_api(system_prompt, prompt, output_format=None):
     try:
         with console.status("[bold yellow]Uploading data and waiting for Gemini...") as status:
-            model = genai.GenerativeModel(MODEL_NAME)
+            # Listar las funciones disponibles
+            tools = [func for name, func in globals().items() if callable(
+                func) and name in os.path.join(SYSTEM_DIR, 'functions')]
+
+            # Crear la configuración de herramientas usando la función tool_config_from_mode
+            tool_config = tool_config_from_mode(
+                "auto", [func.__name__ for func in tools])
+
+            # Configurar el modelo con las herramientas y la configuración de herramientas
+            model = genai.GenerativeModel(
+                MODEL_NAME,
+                system_instruction=system_prompt,
+                tools=tools,
+                tool_config=tool_config
+            )
             cache_path = Path('cache')
 
             if SAVE_PROMPT_HISTORY:
@@ -231,6 +293,10 @@ def process_input(path):
         console.print(
             "Error: Expected a string for 'path', but got a list.", style="bold red")
         return
+    # Verificar si la ruta es una URL de archivo local y convertirla a una ruta de sistema de archivos
+    if path.startswith('file://'):
+        path = path[7:]  # Eliminar el prefijo 'file://'
+
     if path.startswith(('http://', 'https://')):
         with console.status("[bold yellow]Cloning repository...") as status:
             clone_repo(path, directory=Path(WORKSTATION_ORIGINAL_DIR))
@@ -238,6 +304,12 @@ def process_input(path):
     else:
         if not os.path.exists(path):
             console.print("The path does not exist.", style="red")
+            # Solicitar al usuario que reintente ingresar la ruta
+            console.print(
+                "Please re-enter the directory path or repository URL:", style="yellow")
+            new_path = input()
+            if new_path:
+                process_input(new_path)
             return
         if os.path.isdir(path):
             with console.status("[bold yellow]Processing directory...") as status:
@@ -276,9 +348,9 @@ def execute_action(action, previous_results, user_inputs):
         prompt_path = Path('system/prompts') / f"{action['prompt']}.md"
         with open(prompt_path, 'r', encoding='utf-8') as file:
             prompt_content = file.read()
-        formatted_prompt = format_prompt(
+        system_prompt, prompt = format_prompt(
             prompt_content, previous_results, user_inputs)
-        return call_gemini_api(formatted_prompt, output_format)
+        return call_gemini_api(system_prompt, prompt, output_format)
     elif "function" in action:
         function_name = action["function"]
         if function_name in globals():
@@ -290,19 +362,28 @@ def execute_action(action, previous_results, user_inputs):
             return None
 
 
-def handle_actions(actions, previous_results, user_inputs):
+async def handle_actions(actions, previous_results, user_inputs):
     results = []
     for action in actions:
-        if "function" in action:
-            console.print(
-                Markdown(f"\n\n# Function: {action['function']}"), style="bold bright_magenta")
-        elif "prompt" in action:
-            console.print(
-                Markdown(f"\n\n# Prompt: {action['prompt']}"), style="bold bright_magenta")
+        console.print(Markdown(
+            f"\n\n# Processing: {action.get('prompt', action.get('function', 'Action'))}"), style="bold bright_magenta")
 
+        # Capture user feedback with a 2-second timeout only for 'prompt' actions
+        if 'prompt' in action:
+            feedback = await input_with_timeout(
+                "Press enter if you want to add feedback before this step")
+            if feedback:
+                console.print(f"Feedback received", style="green")
+                # Store feedback in user_inputs
+                user_inputs['user feedback'] = feedback
+            else:
+                console.print("No feedback received, continuing...",
+                              style="yellow")
+        # Execute action
         result = execute_action(action, previous_results, user_inputs)
         if result is not None:
             previous_results.append(result)
+
     return results
 
 
@@ -342,11 +423,13 @@ def file_needs_update(source, target):
     return False
 
 
-def handle_option(option):
+async def handle_option(option):
     user_inputs = {}
+    session = PromptSession()
+
     if "inputs" in option:
         for input_detail in option["inputs"]:
-            user_input = session.prompt(
+            user_input = await session.prompt_async(
                 f"Please enter: {input_detail['description']}\n")
             user_inputs[input_detail['name']] = user_input
 
@@ -360,7 +443,7 @@ def handle_option(option):
 
     # Handle actions
     if "actions" in option:
-        results.extend(handle_actions(option["actions"], results, user_inputs))
+        results.extend(await handle_actions(option["actions"], results, user_inputs))
     else:
         console.print(
             "Error: No actions defined for this option.", style="bold red")
@@ -369,20 +452,20 @@ def handle_option(option):
     if results and isinstance(results[-1], dict) and results[-1].get('achieved_goal') == False:
         console.print("Goal not achieved. Choose an option:",
                       style="bold yellow")
-        choice = ConsolePrompt.ask("Choose an option", choices=[
-                                   '1. Retry', '2. Retry with advice', '3. Exit'], default='1')
+        choice = await session.prompt_async("Choose an option", choices=[
+            '1. Retry', '2. Retry with advice', '3. Exit'], default='1')
         if choice.startswith('1'):
-            handle_actions(option["actions"], results,
-                           user_inputs)  # Reintentar
+            await handle_actions(option["actions"], results,
+                                 user_inputs)  # Reintentar
         elif choice.startswith('2'):
-            advice = session.prompt("Enter advice for retrying: ")
+            advice = await session.prompt_async("Enter advice for retrying: ")
             user_inputs['advice'] = advice
-            handle_actions(option["actions"], results, user_inputs)
+            await handle_actions(option["actions"], results, user_inputs)
         elif choice.startswith('3'):
             display_menu()
 
 
-def display_other_functions(options):
+async def display_other_functions(options):
     console.print(Markdown(f"\n\n# Other Functions"), style="bold magenta")
     for index, option in enumerate(options, start=1):
         console.print(f"{index}. {option['description']}", style="bold blue")
@@ -400,9 +483,9 @@ def display_other_functions(options):
         exit_program()  # Sale del programa
     else:
         selected_option = options[int(choice) - 1]
-        handle_option(selected_option)
-        # Repite el menú después de ejecutar una acción
-        display_other_functions(options)
+        await handle_option(selected_option)
+        # Repite el men después de ejecutar una acción
+        await display_other_functions(options)
 
 
 def load_menu_options():
@@ -410,7 +493,7 @@ def load_menu_options():
         return json.load(file)
 
 
-def display_menu():
+async def display_menu():
     console.print(Markdown(f"\n\n# GEMINI WORKSTATION"), style="bold magenta")
     options = load_menu_options()
     main_menu_options = [opt for opt in options if opt.get('main_menu', False)]
@@ -428,12 +511,12 @@ def display_menu():
     choice = ConsolePrompt.ask("Choose an option", choices=[str(
         i) for i in range(1, len(main_menu_options) + 3)])
     if int(choice) == len(main_menu_options) + 1:
-        display_other_functions(other_functions)
+        await display_other_functions(other_functions)
     elif int(choice) == len(main_menu_options) + 2:
         exit_program()
     else:
         selected_option = main_menu_options[int(choice) - 1]
-        handle_option(selected_option)
+        await handle_option(selected_option)
 
 
 def save_output(content, user_inputs, prompt):
@@ -463,7 +546,7 @@ def delete_workspace(previous_results, user_inputs):
     console.print(
         "This will delete all contents in the workspace including the insights data and cache.", style="bold red")
     confirmation = session.prompt(
-        "Type 'delete' to confirm workspace deletion")
+        "Type 'delete' to confirm workspace deletion:\n")
     if confirmation.lower() == 'delete':
         with console.status("[bold green]Deleting workspace contents...") as status:
             # Eliminar contenido de las carpetas 'workstation', 'data' y 'cache'
@@ -565,111 +648,6 @@ def preprocess_json_response(data):
         return None
 
 
-@handle_errors
-def apply_modifications(previous_results, user_inputs=None):
-    modifications = previous_results[-1]
-    modifications = preprocess_json_response(modifications)
-
-    modifications_made = []  # Lista para rastrear las modificaciones realizadas
-
-    with console.status("[bold green]Applying modifications...") as status:
-        total_modifications = len(modifications)
-        for index, modification in enumerate(modifications, start=1):
-            if not isinstance(modification, dict) or not {'file', 'action'}.issubset(modification.keys()):
-                console.print(
-                    f"Error: Modification is not a dictionary or missing required fields in modification for {modification}.", style="bold red")
-                continue
-
-            file_path = modification['file']
-            if not file_path.startswith('/') and not file_path.startswith('./'):
-                file_path = '/' + file_path
-            file_path = f"{Path(WORKSTATION_EDITED_DIR)}{file_path}"
-
-            with open(file_path, 'r') as file:
-                lines = file.readlines()
-
-            action = modification['action']
-
-            if action == 'replace_lines':
-                if 'start_line' in modification and 'end_line' in modification and 'content' in modification:
-                    start_index = modification['start_line'] - 1
-                    end_index = modification['end_line']
-                    console.print(
-                        f"Attempting to replace content from line {start_index+1} to line {end_index} in {file_path}", style="bold yellow")
-
-                    original_content = ''.join(
-                        lines[start_index:end_index]).strip()
-                    lines[start_index:end_index] = [
-                        modification['content'].strip() + '\n']
-
-                    if original_content != ''.join(lines[start_index:end_index]).strip():
-                        console.print(
-                            f"Content replaced successfully.", style="bold green")
-                        modifications_made.append(modification)
-                    else:
-                        console.print(
-                            f"No content changes made.", style="bold yellow")
-
-                    console.print(
-                        f"File: {file_path} - Replace action completed.", style="bold green")
-                else:
-                    console.print(
-                        f"Error: Missing fields for 'replace' action in {file_path}.", style="bold red")
-                    continue
-
-            elif action == 'insert_lines':
-                if 'start_line' in modification and 'content' in modification:
-                    lines.insert(
-                        modification['start_line'], modification['content'].strip() + '\n')
-                    console.print(
-                        f"File: {file_path} - Insert action completed.", style="bold green")
-                    modifications_made.append(modification)
-                else:
-                    console.print(
-                        f"Error: Missing fields for 'insert' action in {file_path}.", style="bold red")
-                    continue
-
-            elif action == 'delete_lines':
-                if 'start_line' in modification and 'end_line' in modification:
-                    del lines[modification['start_line'] -
-                              1:modification['end_line']]
-                    console.print(
-                        f"File: {file_path} - Delete action completed.", style="bold green")
-                    modifications_made.append(modification)
-                else:
-                    console.print(
-                        f"Error: Missing fields for 'delete' action in {file_path}.", style="bold red")
-                    continue
-
-            elif action == 'replace_content_with_regex':
-                if 'start_line' in modification and 'end_line' in modification and 'replace_regex' in modification and 'content' in modification:
-                    regex_key = 'replace_regex' if 'replace_regex' in modification else 'regex_pattern'
-                    pattern = re.compile(modification[regex_key])
-                    for i in range(modification['start_line'] - 1, modification['end_line']):
-                        original_line = lines[i]
-                        lines[i] = pattern.sub(
-                            modification['content'], lines[i])
-                        if lines[i] != original_line:
-                            console.print(
-                                f"Replaced content in line {i + 1} with regex.", style="bold green")
-                            modifications_made.append(modification)
-                    console.print(
-                        f"File: {file_path} - Replace regex action completed.", style="bold green")
-                else:
-                    console.print(
-                        f"Error: Missing fields for 'replace_regex' action in {file_path}.", style="bold red")
-                    raise Exception(
-                        "Error: Missing required fields for 'replace_regex' action.")
-
-            with open(file_path, 'w') as file:
-                file.writelines(lines)
-
-            status.update(
-                f"Processing {index}/{total_modifications} modifications")
-
-    return modifications_made  # Devolver la lista de modificaciones realizadas
-
-
 def recreate_data_file(previous_results, user_inputs):
     """Recreate the data.txt file from the workstation and data directories."""
     config = load_config()
@@ -682,7 +660,7 @@ def recreate_data_file(previous_results, user_inputs):
 
 def exit_program():
     """Exit the program."""
-    console.print("Exiting program...", style="bold red")
+    console.print("\n\nExiting program...", style="bold red")
     exit(0)
 
 
@@ -691,30 +669,33 @@ def handle_sigint(signum, frame):
     exit_program()
 
 
-def main():
+async def main():
     """Main function to handle command line arguments and direct program flow."""
-    parser = argparse.ArgumentParser(
-        description="Manage local files and repositories.")
-    parser.add_argument('path', nargs='?',
-                        help='Path to a directory or a repository URL.')
-    args = parser.parse_args()
+    try:
+        parser = argparse.ArgumentParser(
+            description="Manage local files and repositories.")
+        parser.add_argument('path', nargs='?',
+                            help='Path to a directory or a repository URL.')
+        args = parser.parse_args()
 
-    # Verificar si ya existe un workspace configurado o si hay datos procesados
-    if os.path.exists(WORKSTATION_DIR) and os.listdir(WORKSTATION_DIR):
-        console.print("Workspace already set up.", style="green")
-        display_menu()  # Mostrar el menú directamente si ya hay un workspace
-    elif args.path:
-        process_input(args.path)
-        display_menu()  # Mostrar el menú después de procesar la entrada
-    else:
-        console.print(
-            "Welcome, please enter the directory path or repository URL:", style="yellow")
-        path = input()
-        if path:
-            process_input(path)
-            display_menu()  # Mostrar el menú después de procesar la entrada
+        # Verificar si ya existe un workspace configurado o si hay datos procesados
+        if os.path.exists(WORKSTATION_DIR) and os.listdir(WORKSTATION_DIR):
+            console.print("Workspace already set up.", style="green")
+            await display_menu()  # Mostrar el menú directamente si ya hay un workspace
+        elif args.path:
+            process_input(args.path)
+            await display_menu()  # Mostrar el menú después de procesar la entrada
         else:
-            display_menu()  # Mostrar el menú si no se proporciona una entrada
+            console.print(
+                "Welcome, please enter the directory path or repository URL:", style="yellow")
+            path = input()
+            if path:
+                process_input(path)
+                await display_menu()  # Mostrar el menú después de procesar la entrada
+            else:
+                await display_menu()  # Mostrar el menú si no se proporciona una entrada
+    except KeyboardInterrupt:
+        exit_program()  # Llamar a exit_program cuando se detecta una interrupción del teclado
 
 
 if __name__ == "__main__":
@@ -722,4 +703,4 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, handle_sigint)
     check_api_key()
     load_functions_from_directory()
-    main()
+    asyncio.run(main())

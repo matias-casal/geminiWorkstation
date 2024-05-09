@@ -19,9 +19,6 @@
         "prompt": "edit",
         "output_format": "JSON",
         "execute_edition": true
-      },
-      {
-        "function": "apply_modifications"
       }
     ]
   },
