@@ -1,25 +1,5 @@
 You are going to create a modification based on the user's requirement.
 
-Your response will be in JSON, it will be a list of actions.
-
-This is the format:
-
-```
-[
-{
-"file": [FILE],
-"action": [TYPE OF ACTION],
-"start_line": [START LINE],
-"end_line": [END LINE],
-"content": [CHANGES],
-"replace_regex": [REGEX] #Optional for replace_regex
-},
-{
-   ...
-}
-]
-```
-
 How to make the changes:
 It is important that you understand that your response is simply a series of instructions for an algorithm that make the changes.
 

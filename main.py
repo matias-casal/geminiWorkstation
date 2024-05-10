@@ -1,4 +1,3 @@
-from threading import Thread
 import argparse
 import sys
 import os
@@ -7,27 +6,27 @@ import json
 import signal
 import shutil
 import requests
-import threading
+
 import traceback
 import importlib.util
-from datetime import datetime
-from collections.abc import Iterable
-from prompt_toolkit import PromptSession
+
+from git import Repo
 from shutil import copy
 from pathlib import Path
-from git import Repo
-from rich.console import Console
+from threading import Thread
+from datetime import datetime
 from rich.live import Live
 from rich.text import Text
-from rich.prompt import Prompt as ConsolePrompt
+from rich.console import Console
 from rich.markdown import Markdown
-from rich.spinner import Spinner
+from rich.prompt import Prompt as ConsolePrompt
+from pytimedinput import timedKey
 
 import google.generativeai as genai
 import google.api_core.exceptions
-from google.generativeai import GenerationConfig
-from google.ai.generativelanguage import FunctionDeclaration, Tool, Schema, Type, Content, Part, FunctionResponse, FunctionCall
+# TODO Implement this: Content, Part, FunctionResponse, FunctionCall
 from google.protobuf.json_format import MessageToJson
+from google.ai.generativelanguage import FunctionDeclaration, Tool, Schema, Type
 
 
 DEBUG = os.getenv('DEBUG', False)
@@ -43,42 +42,46 @@ WORKSTATION_ORIGINAL_DIR = os.getenv(
     'WORKSTATION_ORIGINAL_DIR', WORKSTATION_DIR + '/original')
 WORKSTATION_EDITED_DIR = os.getenv(
     'WORKSTATION_EDITED_DIR', WORKSTATION_DIR + '/edited')
-FEEDBACK_TIMEOUT = int(os.getenv('FEEDBACK_TIMEOUT', 10))
+FEEDBACK_TIMEOUT = int(os.getenv('FEEDBACK_TIMEOUT', 4))
 
 
-console = Console(highlight=False)
-session = PromptSession()
+console = Console()
 
 
-def option_timer(instruction, timeout=FEEDBACK_TIMEOUT):
+def option_timer(instruction, responseOnTimeout=True, responseOnEnter=True, responseOnESC=False, timeout=FEEDBACK_TIMEOUT):
     """
     Display a prompt with a countdown timer. Return True if the user presses Enter before the timer expires, otherwise return False.
     """
-    console_update_time = 0.2
-    input_received = [False]
+    user_input = [None]  # Use a list to hold the mutable reference
+    time_start = time.time()
 
-    def get_input():
-        nonlocal input_received
-        input()  # Wait for Enter press
-        input_received[0] = True
+    def wait_for_input(timeout):
+        nonlocal user_input
+        user_input[0], timed_out = timedKey(timeout=timeout)
+        return not timed_out
 
-    input_thread = Thread(target=get_input)
-    input_thread.daemon = True
-    input_thread.start()
+    try:
+        with console.status(f"[bold yellow]Continues in {int(timeout)} secs[/bold yellow] - {instruction}", spinner="dots") as status:
+            input_thread = Thread(target=wait_for_input, args=[timeout])
+            input_thread.daemon = True
+            input_thread.start()
+            while input_thread.is_alive():
+                input_thread.join(timeout=0.1)
+                remaining = timeout - (time.time() - time_start)
+                status.update(
+                    f"[bold yellow]Continues in {int(remaining)} secs[/bold yellow] - {instruction}")
+    except KeyboardInterrupt:
+        exit_program()
+    finally:
+        if input_thread.is_alive():
+            input_thread.join()
 
-    with console.status(f"[bold yellow]{instruction} (Timeout in {timeout} seconds): ", spinner="dots") as status:
-        remaining = timeout
-        while remaining > 0:
-            if input_received[0]:
-                status.update("")
-                return True
-            status.update(
-                f"[bold yellow]{instruction} (Timeout in {remaining:.1f} seconds): ")
-            time.sleep(console_update_time)
-            remaining -= console_update_time  # Decrement the remaining time by 0.3 seconds
-
-    status.update("")
-    return False
+    if user_input[0] == "\r":  # ASCII code for the 'Enter' key
+        return responseOnEnter
+    elif user_input[0] == "\x1b":  # ASCII code for the 'Esc' key
+        return responseOnESC
+    else:
+        return responseOnTimeout
 
 
 def create_function_declaration(func):
@@ -115,9 +118,9 @@ def handle_errors(func):
             return func(*args, **kwargs)
         except Exception as e:
             console.print(
-                f"An unexpected error occurred: {e}", style="bold red")
+                f"An unexpected error occurred, wanna try again?", style="red")
             if DEBUG:
-                console.print(traceback.format_exc(), style="bold red")
+                console.print(e, traceback.format_exc(), style="bold red")
             console.print(
                 "1. Retry\n2. Return to Main Menu\n3. Exit", style="bold yellow")
             choice = ConsolePrompt.ask(
@@ -140,7 +143,7 @@ def check_api_key():
     except KeyError:
         console.print(
             "API Key is not set. Please visit https://aistudio.google.com/app/apikey to obtain your API key.", style="bold red")
-        api_key = session.prompt("Enter your GOOGLE_API_KEY: ")
+        api_key = input("Enter your GOOGLE_API_KEY: ")
         genai.configure(api_key=api_key)
 
 
@@ -192,7 +195,7 @@ def load_and_configure_model(system_prompt, output_format, use_tools):
         # Crear herramientas a partir de las declaraciones de funciones
         tools = [Tool(function_declarations=function_declarations)]
 
-    generation_config = GenerationConfig(
+    generation_config = genai.GenerationConfig(
         max_output_tokens=MAX_OUTPUT_TOKENS)
 
     if output_format == "JSON":
@@ -210,25 +213,20 @@ def load_and_configure_model(system_prompt, output_format, use_tools):
 
 def format_prompt(prompt_name, previous_results, user_inputs):
     with open(SYSTEM_DIR + '/base_prompt.md', 'r', encoding='utf-8') as file:
-        base_prompt_content = file.read()
+        system_prompt = file.read()
     with open(SYSTEM_DIR + '/prompts/' + prompt_name + '.md', 'r', encoding='utf-8') as file:
-        prompt_content = file.read()
+        system_prompt += file.read()
     with open(CACHE_DIR + '/data.txt', 'r', encoding='utf-8') as file:
         attached_content = file.read()
-    # Construir el system_prompt con base_prompt y instructions section
-    system_prompt = f"{base_prompt_content}\n\n"
 
-    if prompt_content:
-        system_prompt += f"\n\n~~~~ INSTRUCTIONS ~~~~\n{prompt_content}\n~~~~ END INSTRUCTIONS ~~~~\n"
-
-    # Construir el prompt completo con todas las secciones
     prompt = " "
+    # Construir el prompt completo con todas las secciones
     if user_inputs and user_inputs != []:
-        prompt += f"\n\n~~~~ USER INPUTS SECTION ~~~~\n{user_inputs}\n~~~~ END USER INPUTS SECTION ~~~~\n"
+        prompt += f"\n\n```+ USER INPUTS SECTION\n{user_inputs}\n- END USER INPUTS SECTION```\n"
     if previous_results:
-        prompt += f"\n\n~~~~ PREVIOUS RESULTS SECTION ~~~~\n{previous_results}\n~~~~ END PREVIOUS RESULTS SECTION ~~~~\n"
+        prompt += f"\n\n```+ PREVIOUS RESULTS SECTION\n{previous_results}\n- END PREVIOUS RESULTS SECTION```\n"
     if attached_content:
-        prompt += f"\n\n~~~~ ATTACHED DATA SECTION ~~~~\n{attached_content}\n~~~~ END ATTACHED DATA SECTION ~~~~\n"
+        prompt += f"\n\n```+ ATTACHED DATA SECTION\n{attached_content}\n- END ATTACHED DATA SECTION```\n"
     if DEBUG:
         console.print('prompt', prompt, style="yellow")
     return system_prompt, prompt
@@ -248,36 +246,38 @@ def args_to_text(args):
 
 
 def handle_function_call(response, output_format):
-    full_response = ""
+    full_actions_response = ""
+    full_text_response = ""
     function_calls = []  # Array to store function calls
 
     if hasattr(response, 'candidates'):
         for candidate in response.candidates:
             if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
-                console.print(
-                    f"Length of parts: {len(candidate.content.parts)}")
                 for part in candidate.content.parts:
-                    if hasattr(part, 'text'):
-                        full_response += part.text + "\n"
+                    if hasattr(part, 'text') and part.text != "":
+                        full_text_response += part.text
                     if hasattr(part, 'function_call') and hasattr(part.function_call, 'name'):
                         function_calls.append(part.function_call)
 
     if output_format != "JSON":
-        console.print(Markdown(full_response))
+        console.print(Markdown(full_text_response, justify='left'))
 
     # Execute collected function calls
-    if DEBUG:
-        console.print('\n-- function_calls:', function_calls, style="yellow")
-
     for func_call in function_calls:
         func_name = func_call.name
         args = getattr(func_call, 'args', {})
         # Check if the function exists in the global scope before calling it
         if func_name in globals():
             try:
+                if DEBUG:
+                    console.print(
+                        f"Calling function {func_name} with args {args}", style="blue italic")
                 function_to_call = globals()[func_name]
                 result = function_to_call(**args)
-                full_response += f"[- function_name: {func_name} - function_response: {result}]"
+                if DEBUG:
+                    console.print(
+                        f"Function returned: {result}", style="green italic")
+                full_actions_response += f"```- function_name: {func_name} - function_response: {result}```"
             except Exception as e:
                 console.print(
                     f"Error executing function {func_name}: {str(e)}", style="bold red")
@@ -286,7 +286,7 @@ def handle_function_call(response, output_format):
                 console.print(
                     f"Function {func_name} is not defined", style="bold red")
 
-    return full_response
+    return full_text_response, full_actions_response
 
 
 @handle_errors
@@ -337,11 +337,12 @@ def call_gemini_api(system_prompt, prompt, output_format=None, use_tools=False):
 
             status.stop()
             if use_tools:
-                full_response = handle_function_call(response, output_format)
+                full_text_response, full_actions_response = handle_function_call(
+                    response, output_format)
             else:
-                full_response = handle_response_chunks(response)
+                full_text_response = handle_response_chunks(response)
                 if output_format != "JSON":
-                    console.print(Markdown(full_response))
+                    console.print(Markdown(full_text_response, justify='left'))
 
             if SAVE_OUTPUT_HISTORY:
                 outputs_path = cache_path / 'outputs_history'
@@ -349,8 +350,9 @@ def call_gemini_api(system_prompt, prompt, output_format=None, use_tools=False):
                 output_filename = outputs_path / f"{timestamp}.txt"
                 with open(output_filename, 'w', encoding='utf-8') as file:
                     file.write(
-                        f"~~~~~~~~~~ Prompt:\n{prompt}\n\n~~~~~~~~~~Response:\n{full_response}")
-            return full_response
+                        f'~~~~~~~~~~ Response text:\n{full_text_response}\n\n~~~~~~~~~~ Response actions:\n{full_actions_response}\n\n~~~~~~~~~~ Prompt\n{prompt}\n\n~~~~~~~~~~ System Prompt\n{system_prompt}\n')
+
+            return full_text_response, full_actions_response
     except google.api_core.exceptions.DeadlineExceeded:
         console.print(
             "Error: The request timed out. Please try again later.", style="bold red")
@@ -399,7 +401,7 @@ def process_directory(directory, config, section_name):
     console.print(f"Directory processed: {directory}", style="green")
 
 
-def process_input(path):
+def process_path_workstation_input(path):
     """Process the input path or URL."""
     if isinstance(path, list):
         console.print(
@@ -421,7 +423,7 @@ def process_input(path):
                 "Please re-enter the directory path or repository URL:", style="yellow")
             new_path = input()
             if new_path:
-                process_input(new_path)
+                process_path_workstation_input(new_path)
             return
         if os.path.isdir(path):
             with console.status("[bold yellow]Processing directory...") as status:
@@ -465,37 +467,45 @@ def execute_action(action, previous_results, user_inputs):
         function_name = action["function"]
         if function_name in globals():
             function_to_call = globals()[function_name]
-            return function_to_call(previous_results, user_inputs)
+            return None, function_to_call(previous_results, user_inputs)
         else:
             console.print(
                 f"Function {function_name} is not defined", style="bold red")
-            return None
+            return None, None
+    return None, None
 
 
-def handle_actions(actions, previous_results, user_inputs):
-    results = []
-    for action in actions:
+def handle_action(action, previous_results, user_inputs):
+    if 'prompt' in action:
         console.print(Markdown(
-            f"\n\n# Processing: {action.get('prompt', action.get('function', 'Action'))}"), style="bold bright_magenta")
+            f"\n\n# Processing prompt: {action['prompt']}"), style="bold bright_blue")
+    elif 'function' in action:
+        console.print(Markdown(
+            f"\n\n# Executing action: {action['function']}"), style="bold bright_blue")
+    else:
+        console.print("Error: No action defined for this option.",
+                      style="bold red")
+        exit_program()
 
-        # Capture user feedback with a 2-second timeout only for 'prompt' actions
-        if 'prompt' in action and 'pre_feedback' in action:
-            feedback = option_timer(
-                "Press Enter if you want to add feedback")
-            if feedback:
-                user_feedback = ConsolePrompt.ask(
-                    "Please provide your feedback")
-                if user_feedback:
-                    user_inputs['user feedback'] = user_feedback
-            else:
-                console.print("No feedback received, continuing...",
-                              style="yellow")
-        # Execute action
-        result = execute_action(action, previous_results, user_inputs)
-        if result is not None:
-            previous_results.append(result)
+    # Capture user feedback with a 2-second timeout only for 'prompt' actions
+    if 'prompt' in action and 'pre_feedback' in action:
+        user_inputs = handle_feedback(user_inputs)
+    # Execute action
+    text, actions = execute_action(action, previous_results, user_inputs)
 
-    return results
+    return text, actions
+
+
+def handle_feedback(user_inputs):
+    user_inputs['feedback'] = user_inputs.get('feedback', [])
+    feedback = option_timer(
+        "[red]Press ESC to continues[/red] - [green]Press Enter to add feedback[/green]", responseOnTimeout=False)
+    if feedback:
+        user_feedback = ConsolePrompt.ask(
+            "[yellow bold italic]Provide feedback")
+        if user_feedback:
+            user_inputs['feedback'].append(user_feedback)
+    return user_inputs
 
 
 def prepare_editing_environment():
@@ -538,8 +548,8 @@ def handle_option(option):
     user_inputs = {}
     if "inputs" in option:
         for input_detail in option["inputs"]:
-            user_input = session.prompt(
-                f"Please enter: {input_detail['description']}\n")
+            console.print(f"{input_detail['description']}", style="yellow")
+            user_input = input()
             user_inputs[input_detail['name']] = user_input
 
     results = []  # Lista para almacenar los resultados de cada acción
@@ -550,16 +560,20 @@ def handle_option(option):
 
     # Handle actions
     if "actions" in option:
-        results.append(handle_actions(option["actions"], results, user_inputs))
-        repeat = option_timer(
-            "Press Enter if you want to repeat the process")
-        while repeat:
-            # Si el usuario quiere repetir, llamar a handle_actions() nuevamente con los resultados actuales
-            results.append(handle_actions(
-                option["actions"], results, user_inputs))
-    else:
-        console.print(
-            "Error: No actions defined for this option.", style="bold red")
+        while True:
+            for action in option["actions"]:
+                text, actions = handle_action(action, results, user_inputs)
+                if text is not None:
+                    results.append(text)
+                if actions is not None and type(actions) == str:
+                    results.append(actions)
+            not_continue = option_timer(
+                "[red]Press Esc to abort[/red] - [green]Press Enter continue[/green] - [yellow]Wait to continue[/yellow]", responseOnTimeout=True, responseOnEnter='feedback')
+
+            if not not_continue:
+                break
+            elif not_continue == 'feedback':
+                user_inputs = handle_feedback(user_inputs)
 
     display_menu()
 
@@ -588,16 +602,22 @@ def display_other_functions(options):
 
 
 def load_menu_options():
-    with open('system/menu_options.json', 'r') as file:
-        return json.load(file)
+    with open(f'{SYSTEM_DIR}/menu_options.json', 'r') as file:
+        try:
+            return json.load(file)
+        except Exception as e:
+            console.print(
+                f"Error loading menu options:\n{e}", style="bold red")
+            exit_program()
 
 
 def display_menu():
     console.print(Markdown(f"\n\n# GEMINI WORKSTATION"), style="bold magenta")
     options = load_menu_options()
-    main_menu_options = [opt for opt in options if opt.get('main_menu', False)]
+    main_menu_options = [opt for opt in options if opt.get('main_menu', False) and (
+        not opt.get('debug_menu', False) or (opt.get('debug_menu', False) and DEBUG))]
     other_functions = [
-        opt for opt in options if not opt.get('main_menu', False)]
+        opt for opt in options if not opt.get('main_menu', False) and (not opt.get('debug_menu', False) or (opt.get('debug_menu', False) and DEBUG))]
 
     for index, option in enumerate(main_menu_options, start=1):
         console.print(f"{index}. {option['description']}", style="bold blue")
@@ -644,7 +664,7 @@ def delete_workspace(previous_results, user_inputs):
     """Delete the workspace after confirmation."""
     console.print(
         "This will delete all contents in the workspace including the insights data and cache.", style="bold red")
-    confirmation = session.prompt(
+    confirmation = input(
         "Type 'delete' to confirm workspace deletion:\n")
     if confirmation.lower() == 'delete':
         with console.status("[bold green]Deleting workspace contents...") as status:
@@ -747,6 +767,23 @@ def preprocess_json_response(data):
         return None
 
 
+def set_workspace(previous_results, user_inputs):
+    """Set up the workspace by cloning the repository, if a URL is provided, or by copying the local directory, if a path is provided."""
+    console.print(
+        "Please enter the directory path or repository URL:", style="yellow")
+    path = input(n)
+    process_path_workstation_input(path)
+
+
+def show_help(previous_results, user_inputs):
+    """Show how to use this tool."""
+    # Fetch the content of INFO.md from the root of the project and display it using Markdown
+    with open('INFO.md', 'r', encoding='utf-8') as file:
+        info_content = file.read()
+    console.print(Markdown(info_content, justify='left'),
+                  style="italic light_coral")
+
+
 def recreate_data_file(previous_results, user_inputs):
     """Recreate the data.txt file from the workstation and data directories."""
     config = load_config()
@@ -771,28 +808,7 @@ def handle_sigint(signum, frame):
 def main():
     """Main function to handle command line arguments and direct program flow."""
     try:
-        parser = argparse.ArgumentParser(
-            description="Manage local files and repositories.")
-        parser.add_argument('path', nargs='?',
-                            help='Path to a directory or a repository URL.')
-        args = parser.parse_args()
-
-        # Verificar si ya existe un workspace configurado o si hay datos procesados
-        if os.path.exists(WORKSTATION_DIR) and os.listdir(WORKSTATION_DIR):
-            console.print("Workspace already set up.", style="green")
-            display_menu()  # Mostrar el menú directamente si ya hay un workspace
-        elif args.path:
-            process_input(args.path)
-            display_menu()  # Mostrar el menú después de procesar la entrada
-        else:
-            console.print(
-                "Welcome, please enter the directory path or repository URL:", style="yellow")
-            path = input()
-            if path:
-                process_input(path)
-                display_menu()  # Mostrar el menú después de procesar la entrada
-            else:
-                display_menu()  # Mostrar el menú si no se proporciona una entrada
+        display_menu()  # Mostrar el menú si no se proporciona una entrada
     except KeyboardInterrupt:
         exit_program()  # Llamar a exit_program cuando se detecta una interrupción del teclado
 

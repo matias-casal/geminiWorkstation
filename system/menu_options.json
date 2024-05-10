@@ -1,11 +1,11 @@
 [
   {
-    "description": "Do with Google`s Gemini",
-    "main_menu": true,
+    "description": "Let's Talk",
+    "debug_menu": true,
     "inputs": [
       {
         "name": "request",
-        "description": "What modifications do you want to make?"
+        "description": "What do you want to talk about?"
       }
     ],
     "actions": [
@@ -19,32 +19,37 @@
     ]
   },
   {
+    "description": "Do actions",
+    "main_menu": true,
+    "inputs": [
+      {
+        "name": "request",
+        "description": "What do you want to do?"
+      }
+    ],
+    "actions": [
+      {
+        "prompt": "do",
+        "tools": true
+      }
+    ]
+  },
+  {
     "description": "Trivia Game",
     "main_menu": true,
     "actions": [
       {
         "prompt": "trivia",
         "tools": true
-      },
-      {
-        "prompt": "trivia_response",
-        "tools": true
       }
     ]
   },
   {
-    "description": "Recreate all the data.",
+    "description": "How to use this tool",
+    "debug_menu": true,
     "actions": [
       {
-        "function": "recreate_data_file"
-      }
-    ]
-  },
-  {
-    "description": "Delete all in the workspace.",
-    "actions": [
-      {
-        "function": "delete_workspace"
+        "function": "show_help"
       }
     ]
   },
@@ -57,24 +62,32 @@
     ]
   },
   {
-    "description": "Understand the content",
-    "main_menu": true,
-    "inputs": [
-      {
-        "name": "topic",
-        "description": "What topic do the LLM expand their knowledge about?"
-      },
-      {
-        "name": "filename",
-        "description": "How would you like to identify the generated information?"
-      }
-    ],
+    "description": "Set workspace.",
+    "debug_menu": true,
     "actions": [
       {
-        "prompt": "understand"
+        "function": "set_workspace"
       },
       {
-        "function": "save_output"
+        "function": "recreate_data_file"
+      }
+    ]
+  },
+  {
+    "description": "Recreate text file with the data in the workspace.",
+    "debug_menu": true,
+    "actions": [
+      {
+        "function": "recreate_data_file"
+      }
+    ]
+  },
+  {
+    "description": "Delete all in the workspace.",
+    "debug_menu": true,
+    "actions": [
+      {
+        "function": "delete_workspace"
       }
     ]
   }
