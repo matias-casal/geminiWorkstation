@@ -1,5 +1,5 @@
 {
-  "dir": {
+  "workspace_dir": {
     "exclude_filenames": [".DS_Store"],
     "exclude_extensions": [
       ".png",

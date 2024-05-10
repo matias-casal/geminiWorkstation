@@ -1,6 +1,6 @@
 [
   {
-    "description": "Edit an entire repo with Google`s Gemini",
+    "description": "Do with Google`s Gemini",
     "main_menu": true,
     "inputs": [
       {
@@ -13,12 +13,22 @@
         "function": "recreate_data_file"
       },
       {
-        "prompt": "plan_modifications"
+        "prompt": "do",
+        "tools": true
+      }
+    ]
+  },
+  {
+    "description": "Trivia Game",
+    "main_menu": true,
+    "actions": [
+      {
+        "prompt": "trivia",
+        "tools": true
       },
       {
-        "prompt": "edit",
-        "output_format": "JSON",
-        "execute_edition": true
+        "prompt": "trivia_response",
+        "tools": true
       }
     ]
   },

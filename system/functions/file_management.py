@@ -2,32 +2,27 @@ import os
 
 
 def create_file(file_path: str, content: str = ''):
-    """
-    Create a new file with optional initial content.
-    This function creates a new file at the specified path and can optionally write initial content to it.
-
-    Args:
-        file_path (str): The path where the new file will be created.
-        content (str): Optional initial content to write to the file.
-
-    Returns:
-        bool: True if the file was created successfully, False otherwise.
-    """
     with open(file_path, 'w') as file:
         file.write(content)
-    return True
+    return f"[file_created]{file_path}[/file_created]"
 
 
 def delete_file(file_path: str):
-    """
-    Delete a file at a specified path.
-    This function deletes the file located at the specified path.
-
-    Args:
-        file_path (str): The path to the file that will be deleted.
-
-    Returns:
-        bool: True if the file was deleted successfully, False otherwise.
-    """
     os.remove(file_path)
-    return True
+    return f"[file_deleted]{file_path}[/file_deleted]"
+
+
+functions_declaration = [{
+    "name": "create_file",
+    "description": "Create a new file with optional initial content.",
+    "parameters": [{
+        "file_path": {"type": "string", "description": "The path to the file where lines will be replaced."},
+        "content": {"type": "string", "description": "The content to insert in place of the specified lines."}
+    }]
+}, {
+    "name": "delete_file",
+    "description": "Delete a file at a specified path.",
+    "parameters": [{
+        "file_path": {"type": "string", "description": "The path to the file that will be deleted."}
+    }]
+}]

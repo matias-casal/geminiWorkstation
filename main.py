@@ -26,9 +26,11 @@ from rich.spinner import Spinner
 import google.generativeai as genai
 import google.api_core.exceptions
 from google.generativeai import GenerationConfig
-from google.generativeai.types import content_types
+from google.ai.generativelanguage import FunctionDeclaration, Tool, Schema, Type, Content, Part, FunctionResponse, FunctionCall
+from google.protobuf.json_format import MessageToJson
 
-DEBUG = os.getenv('DEBUG', True)
+
+DEBUG = os.getenv('DEBUG', False)
 MODEL_NAME = os.getenv('MODEL_NAME', 'gemini-1.5-pro-latest')
 DATA_DIR = os.getenv('DATA_DIR', 'data')
 CACHE_DIR = os.getenv('CACHE_DIR', 'cache')
@@ -41,14 +43,14 @@ WORKSTATION_ORIGINAL_DIR = os.getenv(
     'WORKSTATION_ORIGINAL_DIR', WORKSTATION_DIR + '/original')
 WORKSTATION_EDITED_DIR = os.getenv(
     'WORKSTATION_EDITED_DIR', WORKSTATION_DIR + '/edited')
-FEEDBACK_TIMEOUT = int(os.getenv('FEEDBACK_TIMEOUT', 3))
+FEEDBACK_TIMEOUT = int(os.getenv('FEEDBACK_TIMEOUT', 10))
 
 
 console = Console(highlight=False)
 session = PromptSession()
 
 
-def feedback_timer(timeout=FEEDBACK_TIMEOUT):
+def option_timer(instruction, timeout=FEEDBACK_TIMEOUT):
     """
     Display a prompt with a countdown timer. Return True if the user presses Enter before the timer expires, otherwise return False.
     """
@@ -64,14 +66,14 @@ def feedback_timer(timeout=FEEDBACK_TIMEOUT):
     input_thread.daemon = True
     input_thread.start()
 
-    with console.status(f"[bold yellow]Press Enter if you want to add feedback (Timeout in {timeout} seconds): ", spinner="dots") as status:
+    with console.status(f"[bold yellow]{instruction} (Timeout in {timeout} seconds): ", spinner="dots") as status:
         remaining = timeout
         while remaining > 0:
             if input_received[0]:
                 status.update("")
                 return True
             status.update(
-                f"[bold yellow]Press Enter if you want to add feedback (Timeout in {remaining:.1f} seconds): ")
+                f"[bold yellow]{instruction} (Timeout in {remaining:.1f} seconds): ")
             time.sleep(console_update_time)
             remaining -= console_update_time  # Decrement the remaining time by 0.3 seconds
 
@@ -79,22 +81,26 @@ def feedback_timer(timeout=FEEDBACK_TIMEOUT):
     return False
 
 
-def load_functions_from_directory(directory=os.path.join(SYSTEM_DIR, 'functions')):
-    console.print("Loading functions...", directory, style="yellow")
-    loaded_functions = {}
-    for filename in os.listdir(directory):
-        if filename.endswith('.py'):
-            module_name = filename[:-3]  # Remove the '.py' from filename
-            module_path = os.path.join(directory, filename)
-            spec = importlib.util.spec_from_file_location(
-                module_name, module_path)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            # Import only functions (not classes or other callable types) from the module
-            for func_name, func in module.__dict__.items():
-                if callable(func) and not isinstance(func, type):
-                    loaded_functions[func_name] = func
-    return loaded_functions
+def create_function_declaration(func):
+    """
+    Create a function declaration from a function object.
+    """
+    from inspect import signature, _empty
+    sig = signature(func)
+    properties = {}
+    for param_name, param in sig.parameters.items():
+        param_type = str(param.annotation).split(
+            "'")[1] if param.annotation != _empty else 'string'
+        properties[param_name] = {
+            "type_": Type.STRING if param_type == 'string' else Type.OBJECT,
+            "description": f"The {param_name} of the function."
+        }
+
+    return FunctionDeclaration(
+        name=func.__name__,
+        description=func.__doc__,
+        parameters=Schema(type_=Type.OBJECT, properties=properties)
+    )
 
 
 def show_available_modes(previous_results, user_inputs):
@@ -127,85 +133,185 @@ def handle_errors(func):
 
 
 def check_api_key():
-    """Check if the GEMINI_API_KEY environment variable is set. If not, prompt the user to set it."""
+    """Check if the GOOGLE_API_KEY environment variable is set. If not, prompt the user to set it."""
     try:
-        api_key = os.environ['GEMINI_API_KEY']
+        api_key = os.environ['GOOGLE_API_KEY']
         console.print("API Key is set.", style="green")
     except KeyError:
         console.print(
             "API Key is not set. Please visit https://aistudio.google.com/app/apikey to obtain your API key.", style="bold red")
-        api_key = session.prompt("Enter your GEMINI_API_KEY: ")
+        api_key = session.prompt("Enter your GOOGLE_API_KEY: ")
         genai.configure(api_key=api_key)
 
 
-def tool_config_from_mode(mode: str, fns: Iterable[str] = ()):
-    """Create a tool config with the specified function calling mode."""
-    if mode == "ANY":
-        return {
-            "function_calling_config": {
-                "mode": mode,
-                "allowed_function_names": list(fns)
-            }
-        }
-    else:
-        return {
-            "function_calling_config": {
-                "mode": mode
-            }
-        }
+def load_functions_from_directory(directory=os.path.join(SYSTEM_DIR, 'functions')):
+    loaded_functions = []
+    function_declarations = []
+    for filename in os.listdir(directory):
+        if filename.endswith('.py'):
+            module_name = filename[:-3]  # Remove the '.py' from filename
+            module_path = os.path.join(directory, filename)
+            spec = importlib.util.spec_from_file_location(
+                module_name, module_path)
+            module = importlib.util.module_from_spec(spec)
+            # Create a custom namespace for the module to prevent imports from affecting globals
+            module_namespace = {}
+            # Load the module into the custom namespace
+            # Temporarily add the module to sys.modules
+            sys.modules[module_name] = module
+            try:
+                spec.loader.exec_module(module)
+                # Copy only user-defined functions from the module to the namespace
+                for func_name, func in module.__dict__.items():
+                    if callable(func) and not isinstance(func, type) and not func_name.startswith("__"):
+                        if any(d['name'] == func_name for d in getattr(module, 'functions_declaration', [])):
+                            loaded_functions.append(func)
+                            # Add function to custom namespace
+                            module_namespace[func_name] = func
+                            # Add function to global scope
+                            globals()[func_name] = func
+                            try:
+                                func_decl = create_function_declaration(func)
+                                function_declarations.append(func_decl)
+                            except Exception as e:
+                                console.print(
+                                    f"Error creating function declaration for {func_name}: {str(e)}", style="bold red")
+                        else:
+                            console.print(
+                                f"Warning: Function {func_name} in {filename} is not declared in functions_declaration.", style="bold yellow")
+            finally:
+                # Remove the module from sys.modules
+                del sys.modules[module_name]
+    return loaded_functions, function_declarations
 
 
-def format_prompt(prompt_content, previous_results, user_inputs):
+def load_and_configure_model(system_prompt, output_format, use_tools):
+    tools = []
+    if use_tools:
+        loaded_functions, function_declarations = load_functions_from_directory()
+        # Crear herramientas a partir de las declaraciones de funciones
+        tools = [Tool(function_declarations=function_declarations)]
+
+    generation_config = GenerationConfig(
+        max_output_tokens=MAX_OUTPUT_TOKENS)
+
+    if output_format == "JSON":
+        generation_config.response_mime_type = "application/json"
+    # Configurar el modelo con las herramientas y la configuración de herramientas
+    model = genai.GenerativeModel(
+        MODEL_NAME,
+        system_instruction=system_prompt,
+        generation_config=generation_config,
+        tools=tools
+    )
+
+    return model
+
+
+def format_prompt(prompt_name, previous_results, user_inputs):
     with open(SYSTEM_DIR + '/base_prompt.md', 'r', encoding='utf-8') as file:
         base_prompt_content = file.read()
+    with open(SYSTEM_DIR + '/prompts/' + prompt_name + '.md', 'r', encoding='utf-8') as file:
+        prompt_content = file.read()
     with open(CACHE_DIR + '/data.txt', 'r', encoding='utf-8') as file:
         attached_content = file.read()
-
     # Construir el system_prompt con base_prompt y instructions section
-    system_prompt = f"{base_prompt_content}\n\n-- INSTRUCTIONS:\n{prompt_content}"
+    system_prompt = f"{base_prompt_content}\n\n"
+
+    if prompt_content:
+        system_prompt += f"\n\n~~~~ INSTRUCTIONS ~~~~\n{prompt_content}\n~~~~ END INSTRUCTIONS ~~~~\n"
 
     # Construir el prompt completo con todas las secciones
-    prompt = f"\n\n-------------- USER INPUTS SECTION --------------\n{user_inputs}\n\n-------------- END USER INPUTS SECTION --------------\n"
-    prompt += f"\n\n-------------- PREVIOUS RESULTS SECTION --------------\n{previous_results}\n\n-------------- END PREVIOUS RESULTS SECTION --------------\n"
-    prompt += f"\n\n-------------- ATTACHED DATA SECTION --------------\n{attached_content}\n\n-------------- END ATTACHED DATA SECTION --------------\n"
-
+    prompt = " "
+    if user_inputs and user_inputs != []:
+        prompt += f"\n\n~~~~ USER INPUTS SECTION ~~~~\n{user_inputs}\n~~~~ END USER INPUTS SECTION ~~~~\n"
+    if previous_results:
+        prompt += f"\n\n~~~~ PREVIOUS RESULTS SECTION ~~~~\n{previous_results}\n~~~~ END PREVIOUS RESULTS SECTION ~~~~\n"
+    if attached_content:
+        prompt += f"\n\n~~~~ ATTACHED DATA SECTION ~~~~\n{attached_content}\n~~~~ END ATTACHED DATA SECTION ~~~~\n"
+    if DEBUG:
+        console.print('prompt', prompt, style="yellow")
     return system_prompt, prompt
 
 
+def args_to_text(args):
+    """
+    Attempt to serialize arguments to a JSON-compatible format.
+    Handles complex objects by converting them to a string representation if not directly serializable.
+    """
+    try:
+        json_object = MessageToJson(args)
+        return json.dumps(json_object)
+    except TypeError as e:
+        console.print(
+            f"Failed to serialize arguments: {str(e)}", style="bold red")
+
+
+def handle_function_call(response, output_format):
+    full_response = ""
+    function_calls = []  # Array to store function calls
+
+    if hasattr(response, 'candidates'):
+        for candidate in response.candidates:
+            if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                console.print(
+                    f"Length of parts: {len(candidate.content.parts)}")
+                for part in candidate.content.parts:
+                    if hasattr(part, 'text'):
+                        full_response += part.text + "\n"
+                    if hasattr(part, 'function_call') and hasattr(part.function_call, 'name'):
+                        function_calls.append(part.function_call)
+
+    if output_format != "JSON":
+        console.print(Markdown(full_response))
+
+    # Execute collected function calls
+    if DEBUG:
+        console.print('\n-- function_calls:', function_calls, style="yellow")
+
+    for func_call in function_calls:
+        func_name = func_call.name
+        args = getattr(func_call, 'args', {})
+        # Check if the function exists in the global scope before calling it
+        if func_name in globals():
+            try:
+                function_to_call = globals()[func_name]
+                result = function_to_call(**args)
+                full_response += f"[- function_name: {func_name} - function_response: {result}]"
+            except Exception as e:
+                console.print(
+                    f"Error executing function {func_name}: {str(e)}", style="bold red")
+        else:
+            if func_name:
+                console.print(
+                    f"Function {func_name} is not defined", style="bold red")
+
+    return full_response
+
+
 @handle_errors
-def call_gemini_api(system_prompt, prompt, output_format=None):
+def call_gemini_api(system_prompt, prompt, output_format=None, use_tools=False):
     try:
         with console.status("[bold yellow]Uploading data and waiting for Gemini...") as status:
-            # Listar las funciones disponibles
-            tools = list(load_functions_from_directory().values())
+            if DEBUG:
+                console.print("\n-- Model name:", MODEL_NAME, style="yellow")
 
-            # Crear la configuración de herramientas usando la función tool_config_from_mode
-            tool_config = tool_config_from_mode(
-                "auto", [func.__name__ for func in tools])
-            console.print("Configuring model...",
-                          MODEL_NAME, style="yellow")
-            console.print("Tools:", tools, style="yellow")
-            console.print("Tool config:", tool_config, style="yellow")
-            # Configurar el modelo con las herramientas y la configuración de herramientas
-            model = genai.GenerativeModel(
-                MODEL_NAME,
-                system_instruction=system_prompt,
-                tools=tools,
-                tool_config=tool_config
-            )
+            model = load_and_configure_model(
+                system_prompt, output_format, use_tools)
+
             cache_path = Path('cache')
 
             if SAVE_PROMPT_HISTORY:
-                # Guardar el prompt en la carpeta de historial
                 prompt_history_path = cache_path / 'prompts_history'
                 prompt_history_path.mkdir(exist_ok=True)
                 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
                 prompt_filename = prompt_history_path / f"{timestamp}.txt"
 
                 with open(prompt_filename, 'w', encoding='utf-8') as file:
-                    file.write(prompt)
+                    file.write('~~~~~~~~~~ Prompt\n'+prompt +
+                               '\n\n~~~~~~~~~~ System Prompt\n'+system_prompt)
 
-            token_count = model.count_tokens(prompt).total_tokens
+            token_count = model.count_tokens(system_prompt+prompt).total_tokens
             if token_count > 1000000:
                 console.print(
                     f"Error: The prompt is too big, it has more than 1 million tokens.", style="bold red")
@@ -219,36 +325,31 @@ def call_gemini_api(system_prompt, prompt, output_format=None):
                 console.print(
                     f"The prompt has {token_count} tokens", style="green")
 
-            # Configuración de la generación basada en el formato del prompt
-            generation_config = GenerationConfig(
-                max_output_tokens=MAX_OUTPUT_TOKENS)
-            if output_format == "JSON":
-                generation_config.response_mime_type = "application/json"
-
-            response = model.generate_content(
-                prompt,
-                stream=True,
-                request_options={"timeout": 1200},
-                generation_config=generation_config
+            chat = model.start_chat(
+                enable_automatic_function_calling=use_tools
             )
+            response = chat.send_message(
+                prompt
+            )
+
+            if DEBUG:
+                console.print("\n-- Response:\n", response, style="yellow")
+
             status.stop()
-            full_response = handle_response_chunks(response)
-            if output_format != "JSON":
-                console.print(Markdown(full_response))
+            if use_tools:
+                full_response = handle_function_call(response, output_format)
             else:
-                console.print(full_response, style="italic")
+                full_response = handle_response_chunks(response)
+                if output_format != "JSON":
+                    console.print(Markdown(full_response))
+
             if SAVE_OUTPUT_HISTORY:
-                # Guardar el prompt y la respuesta en la carpeta de outputs
                 outputs_path = cache_path / 'outputs_history'
                 outputs_path.mkdir(exist_ok=True)
                 output_filename = outputs_path / f"{timestamp}.txt"
                 with open(output_filename, 'w', encoding='utf-8') as file:
                     file.write(
-                        f"Prompt:\n{prompt}\n\nResponse:\n{full_response}")
-            for content in response:
-                if content.parts[0].function_call:
-                    console.print(
-                        'function call', content.parts[0].function_call)
+                        f"~~~~~~~~~~ Prompt:\n{prompt}\n\n~~~~~~~~~~Response:\n{full_response}")
             return full_response
     except google.api_core.exceptions.DeadlineExceeded:
         console.print(
@@ -354,14 +455,12 @@ def load_config():
 
 def execute_action(action, previous_results, user_inputs):
     output_format = action.get("output_format", "text")
+    use_tools = action.get("tools", False)
 
     if "prompt" in action:
-        prompt_path = Path('system/prompts') / f"{action['prompt']}.md"
-        with open(prompt_path, 'r', encoding='utf-8') as file:
-            prompt_content = file.read()
         system_prompt, prompt = format_prompt(
-            prompt_content, previous_results, user_inputs)
-        return call_gemini_api(system_prompt, prompt, output_format)
+            action['prompt'], previous_results, user_inputs)
+        return call_gemini_api(system_prompt, prompt, output_format, use_tools)
     elif "function" in action:
         function_name = action["function"]
         if function_name in globals():
@@ -380,17 +479,19 @@ def handle_actions(actions, previous_results, user_inputs):
             f"\n\n# Processing: {action.get('prompt', action.get('function', 'Action'))}"), style="bold bright_magenta")
 
         # Capture user feedback with a 2-second timeout only for 'prompt' actions
-        if 'prompt' in action:
-            feedback = feedback_timer()
+        if 'prompt' in action and 'pre_feedback' in action:
+            feedback = option_timer(
+                "Press Enter if you want to add feedback")
             if feedback:
-                user_inputs['user feedback'] = ConsolePrompt.ask(
+                user_feedback = ConsolePrompt.ask(
                     "Please provide your feedback")
+                if user_feedback:
+                    user_inputs['user feedback'] = user_feedback
             else:
                 console.print("No feedback received, continuing...",
                               style="yellow")
         # Execute action
         result = execute_action(action, previous_results, user_inputs)
-        console.print(f"\n\nResult: {result}", style="bold green")
         if result is not None:
             previous_results.append(result)
 
@@ -444,33 +545,23 @@ def handle_option(option):
     results = []  # Lista para almacenar los resultados de cada acción
 
     # Verificar si alguna acción requiere ejecución de edición
-    execute_edition = any(action.get('execute_edition', False)
-                          for action in option.get('actions', []))
-    if execute_edition:
+    if "use_tools" in option:
         prepare_editing_environment()
 
     # Handle actions
     if "actions" in option:
-        results.extend(handle_actions(option["actions"], results, user_inputs))
+        results.append(handle_actions(option["actions"], results, user_inputs))
+        repeat = option_timer(
+            "Press Enter if you want to repeat the process")
+        while repeat:
+            # Si el usuario quiere repetir, llamar a handle_actions() nuevamente con los resultados actuales
+            results.append(handle_actions(
+                option["actions"], results, user_inputs))
     else:
         console.print(
             "Error: No actions defined for this option.", style="bold red")
 
-    # Verificar si el último resultado es un JSON con achieved_goal en false
-    if results and isinstance(results[-1], dict) and results[-1].get('achieved_goal') == False:
-        console.print("Goal not achieved. Choose an option:",
-                      style="bold yellow")
-        choice = ConsolePrompt.ask("Choose an option", choices=[
-                                   '1. Retry', '2. Retry with advice', '3. Exit'], default='1')
-        if choice.startswith('1'):
-            handle_actions(option["actions"], results,
-                           user_inputs)  # Reintentar
-        elif choice.startswith('2'):
-            advice = session.prompt("Enter advice for retrying: ")
-            user_inputs['advice'] = advice
-            handle_actions(option["actions"], results, user_inputs)
-        elif choice.startswith('3'):
-            display_menu()
+    display_menu()
 
 
 def display_other_functions(options):
@@ -661,8 +752,8 @@ def recreate_data_file(previous_results, user_inputs):
     config = load_config()
     # Limpiar el archivo data.txt antes de escribir
     open(Path(CACHE_DIR) / 'data.txt', 'w').close()
-    process_directory(WORKSTATION_DIR, config['dir'], "Workstation")
-    process_directory(DATA_DIR, config['dir'], "Extra information")
+    process_directory(WORKSTATION_DIR, config['workspace_dir'], "Workstation")
+    process_directory(DATA_DIR, config['workspace_dir'], "Extra information")
     console.print("Data has been recreated.", style="bold green")
 
 
