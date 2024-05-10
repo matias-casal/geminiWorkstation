@@ -771,7 +771,7 @@ def set_workspace(previous_results, user_inputs):
     """Set up the workspace by cloning the repository, if a URL is provided, or by copying the local directory, if a path is provided."""
     console.print(
         "Please enter the directory path or repository URL:", style="yellow")
-    path = input(n)
+    path = input()
     process_path_workstation_input(path)
 
 
