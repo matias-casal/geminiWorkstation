@@ -11,11 +11,12 @@ setup(
     author_email='tempo-rices01@icloud.com',
     url='https://github.com/matias-casal/geminiWorkstation',
     install_requires=[
-        'argparse',
-        'gitpython',
-        'requests',
         'rich',
-        'inputimeout',
+        'argparse',
+        'requests',
+        'gitpython',
+        'prompt_toolkit',
+        'pytimedinput',
         'google-generativeai'
     ],
     entry_points={

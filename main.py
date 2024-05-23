@@ -18,9 +18,13 @@ from datetime import datetime
 from rich.live import Live
 from rich.text import Text
 from rich.console import Console
+from pytimedinput import timedKey
 from rich.markdown import Markdown
 from rich.prompt import Prompt as ConsolePrompt
-from pytimedinput import timedKey
+from prompt_toolkit import PromptSession, HTML
+from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.shortcuts import CompleteStyle
 
 import google.generativeai as genai
 import google.api_core.exceptions
@@ -46,6 +50,11 @@ FEEDBACK_TIMEOUT = int(os.getenv('FEEDBACK_TIMEOUT', 4))
 
 
 console = Console()
+session = PromptSession(
+    history=InMemoryHistory(),
+    auto_suggest=AutoSuggestFromHistory(),
+    complete_style=CompleteStyle.READLINE_LIKE
+)
 
 
 def option_timer(instruction, responseOnTimeout=True, responseOnEnter=True, responseOnESC=False, timeout=FEEDBACK_TIMEOUT):
@@ -76,7 +85,7 @@ def option_timer(instruction, responseOnTimeout=True, responseOnEnter=True, resp
         if input_thread.is_alive():
             input_thread.join()
 
-    if user_input[0] == "\r":  # ASCII code for the 'Enter' key
+    if user_input[0] == "\n":  # ASCII code for the 'Enter' key
         return responseOnEnter
     elif user_input[0] == "\x1b":  # ASCII code for the 'Esc' key
         return responseOnESC
@@ -143,7 +152,7 @@ def check_api_key():
     except KeyError:
         console.print(
             "API Key is not set. Please visit https://aistudio.google.com/app/apikey to obtain your API key.", style="bold red")
-        api_key = input("Enter your GOOGLE_API_KEY: ")
+        api_key = session.prompt("Enter your GOOGLE_API_KEY: ")
         genai.configure(api_key=api_key)
 
 
@@ -222,11 +231,11 @@ def format_prompt(prompt_name, previous_results, user_inputs):
     prompt = " "
     # Construir el prompt completo con todas las secciones
     if user_inputs and user_inputs != []:
-        prompt += f"\n\n```+ USER INPUTS SECTION\n{user_inputs}\n- END USER INPUTS SECTION```\n"
+        prompt += f"\n\n```USER INPUTS SECTION:\n{user_inputs}\n```"
     if previous_results:
-        prompt += f"\n\n```+ PREVIOUS RESULTS SECTION\n{previous_results}\n- END PREVIOUS RESULTS SECTION```\n"
+        prompt += f"\n\n```PREVIOUS RESULTS SECTION:\n{previous_results}\n```"
     if attached_content:
-        prompt += f"\n\n```+ ATTACHED DATA SECTION\n{attached_content}\n- END ATTACHED DATA SECTION```\n"
+        prompt += f"\n\n```ATTACHED DATA SECTION:\n{attached_content}\n```"
     if DEBUG:
         console.print('prompt', prompt, style="yellow")
     return system_prompt, prompt
@@ -277,7 +286,7 @@ def handle_function_call(response, output_format):
                 if DEBUG:
                     console.print(
                         f"Function returned: {result}", style="green italic")
-                full_actions_response += f"```- function_name: {func_name} - function_response: {result}```"
+                full_actions_response += f"- function_name: {func_name} - function_response: {result}"
             except Exception as e:
                 console.print(
                     f"Error executing function {func_name}: {str(e)}", style="bold red")
@@ -421,7 +430,7 @@ def process_path_workstation_input(path):
             # Solicitar al usuario que reintente ingresar la ruta
             console.print(
                 "Please re-enter the directory path or repository URL:", style="yellow")
-            new_path = input()
+            new_path = session.prompt()
             if new_path:
                 process_path_workstation_input(new_path)
             return
@@ -496,13 +505,13 @@ def handle_action(action, previous_results, user_inputs):
     return text, actions
 
 
-def handle_feedback(user_inputs):
+def handle_feedback(user_inputs, directly=False):
     user_inputs['feedback'] = user_inputs.get('feedback', [])
-    feedback = option_timer(
+    feedback = directly or option_timer(
         "[red]Press ESC to continues[/red] - [green]Press Enter to add feedback[/green]", responseOnTimeout=False)
     if feedback:
-        user_feedback = ConsolePrompt.ask(
-            "[yellow bold italic]Provide feedback")
+        user_feedback = session.prompt(
+            HTML("<yellow><bold><italic>Provide feedback</italic></bold></yellow> "))
         if user_feedback:
             user_inputs['feedback'].append(user_feedback)
     return user_inputs
@@ -549,7 +558,7 @@ def handle_option(option):
     if "inputs" in option:
         for input_detail in option["inputs"]:
             console.print(f"{input_detail['description']}", style="yellow")
-            user_input = input()
+            user_input = session.prompt()
             user_inputs[input_detail['name']] = user_input
 
     results = []  # Lista para almacenar los resultados de cada acción
@@ -568,12 +577,11 @@ def handle_option(option):
                 if actions is not None and type(actions) == str:
                     results.append(actions)
             not_continue = option_timer(
-                "[red]Press Esc to abort[/red] - [green]Press Enter continue[/green] - [yellow]Wait to continue[/yellow]", responseOnTimeout=True, responseOnEnter='feedback')
-
+                "[red]Press Esc to abort[/red] - [green]Press Enter add feedback[/green]", responseOnTimeout=True, responseOnEnter='feedback')
+            if not_continue == 'feedback':
+                user_inputs = handle_feedback(user_inputs, directly=True)
             if not not_continue:
                 break
-            elif not_continue == 'feedback':
-                user_inputs = handle_feedback(user_inputs)
 
     display_menu()
 
@@ -664,7 +672,7 @@ def delete_workspace(previous_results, user_inputs):
     """Delete the workspace after confirmation."""
     console.print(
         "This will delete all contents in the workspace including the insights data and cache.", style="bold red")
-    confirmation = input(
+    confirmation = session.prompt(
         "Type 'delete' to confirm workspace deletion:\n")
     if confirmation.lower() == 'delete':
         with console.status("[bold green]Deleting workspace contents...") as status:
@@ -771,7 +779,7 @@ def set_workspace(previous_results, user_inputs):
     """Set up the workspace by cloning the repository, if a URL is provided, or by copying the local directory, if a path is provided."""
     console.print(
         "Please enter the directory path or repository URL:", style="yellow")
-    path = input()
+    path = session.prompt()
     process_path_workstation_input(path)
 
 
